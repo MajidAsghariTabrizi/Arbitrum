@@ -1,0 +1,18 @@
+{
+  "name": "aave-v3-liquidation-bot",
+  "version": "1.0.0",
+  "description": "Liquidation Bot for Aave V3 on Arbitrum",
+  "main": "index.js",
+  "scripts": {
+    "test": "hardhat test"
+  },
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@aave/core-v3": "^1.19.3",
+    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "@openzeppelin/contracts": "^4.9.3",
+    "dotenv": "^16.3.1",
+    "hardhat": "^2.19.0"
+  }
+}
