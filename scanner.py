@@ -19,12 +19,11 @@ w3 = Web3(Web3.HTTPProvider(RPC_URL))
 POOL_ADDRESS = "0x794a61358D6845594F94dc1DB02A252b5b4814aD"
 
 # Borrow Event Signature
-# Borrow(address,address,address,uint256,uint256,uint256,uint16)
 BORROW_TOPIC = w3.keccak(text="Borrow(address,address,address,uint256,uint256,uint256,uint16)").hex()
 
-# SETTINGS
-TOTAL_BLOCKS_TO_SCAN = 100000  # Total history to check
-CHUNK_SIZE = 9000              # Safe limit per request (Chainstack allows ~10k)
+# SETTINGS - ULTRA SAFE MODE
+TOTAL_BLOCKS_TO_SCAN = 50000   # Reduced history to speed up (last ~3 hours)
+CHUNK_SIZE = 500               # Very small chunks to prevent "Limit Exceeded" error
 
 def scan_recent_borrowers():
     if not w3.is_connected():
@@ -35,7 +34,7 @@ def scan_recent_borrowers():
     start_block = current_block - TOTAL_BLOCKS_TO_SCAN
     
     print(f"📡 Connected! Scanning blocks {start_block} to {current_block}")
-    print(f"🔄 Strategy: Chunking into {CHUNK_SIZE} blocks per request...")
+    print(f"🔄 Strategy: Ultra-Safe Chunking ({CHUNK_SIZE} blocks/req)...")
 
     all_users = set()
     
@@ -43,7 +42,8 @@ def scan_recent_borrowers():
     for chunk_start in range(start_block, current_block, CHUNK_SIZE):
         chunk_end = min(chunk_start + CHUNK_SIZE, current_block)
         
-        print(f"   ⏳ Scanning chunk: {chunk_start} -> {chunk_end} ...", end="\r")
+        # Print progress clearly
+        print(f"   ⏳ Scanning: {chunk_start} -> {chunk_end} | Found so far: {len(all_users)}", end="\r")
         
         try:
             logs = w3.eth.get_logs({
@@ -54,14 +54,16 @@ def scan_recent_borrowers():
             })
             
             for log in logs:
-                # Extract address from topic 3 (onBehalfOf)
                 if len(log['topics']) >= 4:
                     user_address = "0x" + log['topics'][3].hex()[-40:]
                     all_users.add(w3.to_checksum_address(user_address))
+            
+            # Small delay to be kind to the API
+            time.sleep(0.1) 
                     
         except Exception as e:
             print(f"\n   ⚠️ Error in chunk {chunk_start}-{chunk_end}: {e}")
-            time.sleep(1) # Wait a bit and continue
+            time.sleep(1)
             
     print(f"\n✅ Scan Complete. Found {len(all_users)} unique active borrowers.")
     return list(all_users)
