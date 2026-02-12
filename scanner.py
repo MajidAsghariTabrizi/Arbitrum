@@ -1,46 +1,48 @@
 import requests
 import json
-import logging
+import time
 
-# Setup Logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
-logger = logging.getLogger("Scanner")
+# Aave V3 Arbitrum Subgraph
+GRAPH_URL = "https://api.thegraph.com/subgraphs/name/aave/protocol-v3-arbitrum"
 
-SUBGRAPH_URL = "https://api.thegraph.com/subgraphs/name/aave/protocol-v3-arbitrum"
-
-def fetch_targets():
+def get_risky_users():
+    print("📡 Querying Aave V3 Arbitrum Subgraph (Deep Scan)...")
+    
+    # کوئری جدید: جستجو در دفترچه بدهی‌ها (دقیق‌تر)
     query = """
     {
-      users(first: 1000, where: {borrowedReservesCount_gt: 0}) {
-        id
+      userReserves(first: 1000, where: {currentTotalDebt_gt: "0"}, orderBy: currentTotalDebt, orderDirection: desc) {
+        user {
+          id
+        }
       }
     }
     """
     
-    logger.info("📡 Querying Aave V3 Arbitrum Subgraph...")
-    
     try:
-        response = requests.post(SUBGRAPH_URL, json={'query': query})
-        response.raise_for_status()
-        
+        response = requests.post(GRAPH_URL, json={'query': query})
         data = response.json()
-        users = data.get('data', {}).get('users', [])
         
-        target_addresses = [user['id'] for user in users]
-        
-        # Save to targets.json
-        with open('targets.json', 'w') as f:
-            json.dump(target_addresses, f, indent=4)
+        if 'errors' in data:
+            print("❌ Graph Error:", data['errors'])
+            return []
             
-        logger.info(f"✅ Successfully found and saved {len(target_addresses)} targets to targets.json")
-        return target_addresses
+        # استخراج آدرس‌های منحصر به فرد
+        users = list(set([item['user']['id'] for item in data['data']['userReserves']]))
+        
+        print(f"✅ Successfully found {len(users)} active borrowers.")
+        return users
         
     except Exception as e:
-        logger.error(f"❌ Failed to fetch targets: {e}")
+        print(f"💥 Connection failed: {e}")
         return []
 
 if __name__ == "__main__":
-    fetch_targets()
+    targets = get_risky_users()
+    
+    if len(targets) > 0:
+        with open("targets.json", "w") as f:
+            json.dump(targets, f)
+        print(f"💾 Saved {len(targets)} unique targets to 'targets.json'")
+    else:
+        print("⚠️ No targets found. Something is wrong with the Graph API.")
