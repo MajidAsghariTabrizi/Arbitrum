@@ -6,6 +6,7 @@ import time
 from web3 import AsyncWeb3
 from web3.providers import AsyncHTTPProvider
 from dotenv import load_dotenv
+import db_manager
 
 # Setup Logging
 logging.basicConfig(
@@ -80,12 +81,14 @@ class ExecutionEngine:
     async def connect(self):
         if not RPC_URL or not PRIVATE_KEY or not LIQUIDATOR_ADDRESS:
             logger.error("❌ Missing .env configuration (RPC_URL, PRIVATE_KEY, or LIQUIDATOR_ADDRESS)")
+            db_manager.log_event("ERROR", "Missing .env configuration")
             return False
         
         try:
             self.w3 = AsyncWeb3(AsyncHTTPProvider(RPC_URL))
             if not await self.w3.is_connected():
                 logger.error("❌ Failed to connect to Arbitrum RPC")
+                db_manager.log_event("ERROR", "Failed to connect to Arbitrum RPC")
                 return False
             
             self.account = self.w3.eth.account.from_key(PRIVATE_KEY)
@@ -93,6 +96,7 @@ class ExecutionEngine:
             self.liquidator = self.w3.eth.contract(address=self.w3.to_checksum_address(LIQUIDATOR_ADDRESS), abi=LIQUIDATOR_ABI)
             
             logger.info(f"✅ Connection Established | Account: {self.account.address}")
+            db_manager.log_event("INFO", f"Connection Established | Account: {self.account.address}")
             logger.info(f"📜 Liquidator: {LIQUIDATOR_ADDRESS}")
             return True
         except Exception as e:
@@ -139,6 +143,7 @@ class ExecutionEngine:
                 return False
 
             logger.warning(f"💥 LIQUIDATING USER: {user} | Dept Amount: {amount_to_liquidate/1e6:.2f} USDC")
+            db_manager.log_event("WARNING", f"LIQUIDATING USER: {user} | Dept: {amount_to_liquidate/1e6:.2f} USDC")
             
             nonce = await self.w3.eth.get_transaction_count(self.account.address)
             gas_price = await self.w3.eth.gas_price
@@ -161,28 +166,44 @@ class ExecutionEngine:
             signed_tx = self.account.sign_transaction(tx)
             tx_hash = await self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
             
-            logger.info(f"� Transaction Broadcasted: {tx_hash.hex()}")
+            logger.info(f" Transaction Broadcasted: {tx_hash.hex()}")
+            db_manager.log_event("INFO", f"Transaction Broadcasted: {tx_hash.hex()}")
             
             receipt = await self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
             if receipt.status == 1:
                 logger.info(f"✅ LIQUIDATION CONFIRMED | Block: {receipt.blockNumber}")
+                db_manager.log_event("INFO", f"LIQUIDATION CONFIRMED | Block: {receipt.blockNumber}")
+                
+                # Record Execution
+                db_manager.record_execution(
+                    tx_hash.hex(),
+                    user,
+                    USDC_ADDRESS, # Debt
+                    WETH_ADDRESS, # Collateral (Assuming WETH for now as per logic)
+                    0.0, # Eth Profit (Needs calculation or logic update to fetch actuals)
+                    ((amount_to_liquidate * 0.05) / 1e6) # Est Profit (5% bonus approx)
+                )
                 return True
             else:
                 logger.error("❌ LIQUIDATION REVERTED")
+                db_manager.log_event("ERROR", "LIQUIDATION REVERTED")
                 return False
                 
         except Exception as e:
             logger.error(f"❌ Execution Failure: {e}")
+            db_manager.log_event("ERROR", f"Execution Failure: {e}")
             return False
 
     async def monitor(self):
         logger.info("⚡ Symphony Engine Started. Monitoring Live...")
+        db_manager.log_event("INFO", "Symphony Engine Started")
         
         while True:
             try:
                 # 1. DYNAMIC HOT RELOAD
                 targets = self.hot_reload_targets()
                 logger.info(f"🎯 Loaded {len(targets)} targets from scanner...")
+                db_manager.log_event("INFO", f"Loaded {len(targets)} targets")
                 
                 # 2. PRECISION HEALTH CHECK
                 for user in targets:
