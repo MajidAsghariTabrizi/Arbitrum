@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import time
+import json
 from web3 import AsyncWeb3
 from web3.providers import WebSocketProvider
 from dotenv import load_dotenv
@@ -29,10 +30,14 @@ ANTI_GRAVITY_HF_THRESHOLD = 1.1
 GAS_PRICE_SPIKE_THRESHOLD = 0.5 * 10**9 # 0.5 Gwei
 
 # State
-TARGET_USERS = [
-    # Mock user for initial test
-    "0x0000000000000000000000000000000000000000"
-]
+try:
+    with open('targets.json', 'r') as f:
+        TARGET_USERS = json.load(f)
+    logger.info(f"📋 Loaded {len(TARGET_USERS)} targets from targets.json")
+except Exception as e:
+    logger.warning(f"⚠️ Could not load targets.json ({e}). Starting with empty list.")
+    TARGET_USERS = []
+
 user_states = {} # address -> 'Aggressive' | 'Normal'
 
 # Minimal ABI for getUserAccountData
@@ -57,7 +62,7 @@ class GravityBot:
     def __init__(self):
         self.w3 = None
         self.pool_contract = None
-        self.dry_run = True # Default to Dry Run
+        self.dry_run = False # Production Mode enabled
 
     async def connect(self):
         try:
