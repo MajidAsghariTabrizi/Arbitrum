@@ -29,15 +29,14 @@ GRAVITY_HF_THRESHOLD = 1.05
 ANTI_GRAVITY_HF_THRESHOLD = 1.1
 GAS_PRICE_SPIKE_THRESHOLD = 0.5 * 10**9 # 0.5 Gwei
 
-# State
-try:
-    with open('targets.json', 'r') as f:
-        TARGET_USERS = json.load(f)
-    logger.info(f"📋 Loaded {len(TARGET_USERS)} targets from targets.json")
-except Exception as e:
-    logger.warning(f"⚠️ Could not load targets.json ({e}). Starting with empty list.")
-    TARGET_USERS = []
+FALLBACK_TARGETS = [
+    "0x99525208453488C9518001712C7F72428514197F",
+    "0x5a52E96BAcdaBb82fd05763E25335261B270Efcb",
+    "0xF977814e90dA44bFA03b6295A0616a897441aceC",
+    "0x4a923335FDD029841103F647065094247290A7a2"
+]
 
+# State
 user_states = {} # address -> 'Aggressive' | 'Normal'
 
 # Minimal ABI for getUserAccountData
@@ -80,6 +79,21 @@ class GravityBot:
         except Exception as e:
             logger.error(f"Connection Error: {e}")
             return False
+
+    def load_targets(self):
+        """Reloads TARGET_USERS from targets.json or uses fallbacks."""
+        try:
+            if os.path.exists('targets.json'):
+                with open('targets.json', 'r') as f:
+                    targets = json.load(f)
+                    if targets:
+                        return list(set(targets)) # Unique
+            
+            logger.warning("⚠️ targets.json empty or missing. Using Fallback Whales.")
+            return FALLBACK_TARGETS
+        except Exception as e:
+            logger.error(f"Error loading targets: {e}")
+            return FALLBACK_TARGETS
 
     async def check_health_factor(self, user):
         try:
@@ -190,14 +204,39 @@ class GravityBot:
 
         logger.info("\n✅ Mock Simulation Complete.")
 
+    async def monitor_loop(self):
+        """
+        Main Production Loop: Reloads targets and checks health factors continuously.
+        """
+        logger.info("🚀 Starting Production Monitoring Loop...")
+        
+        while True:
+            try:
+                # 1. Dynamic Target Reloading
+                targets = self.load_targets()
+                gas_price = await self.get_gas_price()
+                
+                logger.info(f"--- Cycle Start | Targets: {len(targets)} | Gas: {gas_price/1e9:.2f} Gwei ---")
+                
+                # 2. Process all targets
+                tasks = [self.process_user(u, gas_price) for u in targets]
+                await asyncio.gather(*tasks)
+                
+                # 3. Sleep before next cycle
+                await asyncio.sleep(10) # 10s check interval for Normal mode
+                
+            except Exception as e:
+                logger.error(f"Loop Error: {e}")
+                await asyncio.sleep(5)
+
 async def main():
     bot = GravityBot()
     if await bot.connect():
-        # run the mock logic to demonstrate features
-        await bot.run_mock_logic()
+        # run the mock logic to demonstrate features (Optional)
+        # await bot.run_mock_logic()
         
-        # To run real monitoring, uncomment:
-        # await bot.monitor_loop() 
+        # Start Production Monitoring
+        await bot.monitor_loop() 
 
 if __name__ == "__main__":
     try:
