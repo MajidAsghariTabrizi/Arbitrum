@@ -44,7 +44,7 @@ if not RPC_URL or not PRIVATE_KEY:
 # Arbitrum One Addresses (EIP-55 Checksummed)
 POOL_ADDRESS = AsyncWeb3.to_checksum_address("0x794a61358D6845594F94dc1DB02A252b5b4814aD")
 POOL_ADDRESSES_PROVIDER = AsyncWeb3.to_checksum_address("0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb")
-DATA_PROVIDER_ADDRESS = AsyncWeb3.to_checksum_address("0x69FA688f1Dc47d4B5d8029d5a35FAC9F5cA1EEb1")
+DATA_PROVIDER_ADDRESS = AsyncWeb3.to_checksum_address("0x69fa688f1dc47d4b5d8029d5a35fb7a548310654")
 QUOTER_V2_ADDRESS = AsyncWeb3.to_checksum_address("0x61fFE014bA17989E743c5F6cB21bF9697530B21e") # Uniswap V3 Quoter V2
 
 # Concurrency
