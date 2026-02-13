@@ -154,7 +154,7 @@ with tab1:
         # For this demo, assuming we might simulate HF if scanner doesn't write it
         st.dataframe(
             df_targets,
-            use_container_width=True,
+            width='stretch',
             hide_index=True,
             height=400
         )
@@ -165,7 +165,7 @@ with tab2:
     st.subheader("Liquidation History")
     df_exec = get_executions()
     if not df_exec.empty:
-        st.dataframe(df_exec, use_container_width=True)
+        st.dataframe(df_exec, width='stretch')
     else:
         st.write("No liquidations recorded yet.")
 

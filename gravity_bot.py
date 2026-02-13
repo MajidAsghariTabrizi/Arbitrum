@@ -243,11 +243,11 @@ class AdaptiveSniperBot:
     async def load_targets_async(self):
         """Reads targets.json asynchronously."""
         try:
-                if os.path.exists("/root/Arbitrum/targets.json"):
-                    target_file = "/root/Arbitrum/targets.json"
-                else:
-                    target_file = "targets.json"
-                    
+            if os.path.exists("/root/Arbitrum/targets.json"):
+                target_file = "/root/Arbitrum/targets.json"
+            else:
+                target_file = "targets.json"
+            
             async with aiofiles.open(target_file, "r") as f:
                 content = await f.read()
                 if content:
@@ -519,12 +519,14 @@ class AdaptiveSniperBot:
             results = await asyncio.gather(*tasks)
 
             for user, hf in results:
-                if hf and hf < 3.0: # فقط برای تست شبیه‌ساز
+                # ⚠️ PRODUCTION: Change threshold to `hf < 1.0` for real liquidations.
+                # Current value `hf < 3.0` is for DRY-RUN / SIMULATION testing only.
+                if hf and hf < 3.0:
                     await self.log_system(f"🧪 TEST MODE TRIGGERED FOR {user} | HF: {hf:.4f}", "info")
                     await self.execute_liquidation(user)
                 elif hf and hf < 1.02:
-                     # Pre-load data for risky users?
-                     pass
+                    # Pre-load data for risky users?
+                    pass
 
 
             elapsed = time.time() - start_time
