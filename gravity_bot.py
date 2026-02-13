@@ -242,8 +242,7 @@ class AdaptiveSniperBot:
 
     async def load_targets_async(self):
         try:
-            async with aiofiles.open("targets.json", "r") as f:
-                content = await f.read()
+async with aiofiles.open("/root/Arbitrum/targets.json", "r") as f:                content = await f.read()
                 self.targets = json.loads(content)
         except Exception:
             self.targets = []
@@ -508,8 +507,9 @@ class AdaptiveSniperBot:
             tasks = [self.check_user_health(user) for user in self.targets]
             results = await asyncio.gather(*tasks)
 
-            for user, hf in results:
-                if hf and hf < 1.0:
+           for user, hf in results:
+                if hf and hf < 3.0: # فقط برای تست شبیه‌ساز
+                    await self.log_system(f"🧪 TEST MODE TRIGGERED FOR {user} | HF: {hf:.4f}", "info")
                     await self.execute_liquidation(user)
                 elif hf and hf < 1.02:
                      # Pre-load data for risky users?
