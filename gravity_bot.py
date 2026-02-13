@@ -283,6 +283,10 @@ class AdaptiveSniperBot:
         2. Maximum Value Collateral Asset (to seize)
         Returns: (debt_asset, collateral_asset, debt_amount, debt_value_usd)
         """
+        # Ensure prices are loaded before analyzing
+        if not self.prices:
+            await self.update_prices()
+
         best_debt = None
         best_collateral = None
         max_debt_value = Decimal(0)
@@ -297,7 +301,9 @@ class AdaptiveSniperBot:
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         for i, res in enumerate(results):
-            if isinstance(res, Exception): continue
+            if isinstance(res, Exception):
+                await self.log_system(f"⚠️ DataProvider error for asset {self.reserves_list[i]}: {res}", "warning")
+                continue
             
             asset = self.reserves_list[i]
             price = self.prices.get(asset, 0)
