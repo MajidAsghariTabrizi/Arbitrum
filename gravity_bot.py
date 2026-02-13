@@ -484,10 +484,10 @@ class AdaptiveSniperBot:
             signed_tx = self.w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
             
             # SEND !
-            # tx_hash = await self.w3.eth.send_raw_transaction(signed_tx.rawTransaction)
-            # await self.log_system(f"🔥 TX SENT: {tx_hash.hex()}", "success")
+            tx_hash = await self.w3.eth.send_raw_transaction(signed_tx.rawTransaction)
+            await self.log_system(f"🔥 TX SENT: {tx_hash.hex()}", "success")
             
-            await self.log_system(f"🔫 Simulation: Would send TX for {user}. Gas: {max_fee}", "success")
+            # await self.log_system(f"🔫 Simulation: Would send TX for {user}. Gas: {max_fee}", "success")
             
         except Exception as e:
             await self.log_system(f"Tx Build Failed: {e}", "error")
@@ -527,7 +527,7 @@ class AdaptiveSniperBot:
             for user, hf in results:
                 # ⚠️ PRODUCTION: Change threshold to `hf < 1.0` for real liquidations.
                 # Current value `hf < 3.0` is for DRY-RUN / SIMULATION testing only.
-                if hf and hf < 3.0:
+                if hf and hf < 1.0:
                     await self.log_system(f"🧪 TEST MODE TRIGGERED FOR {user} | HF: {hf:.4f}", "info")
                     await self.execute_liquidation(user)
                 elif hf and hf < 1.02:
