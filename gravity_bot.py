@@ -240,12 +240,17 @@ class AdaptiveSniperBot:
         except:
             return 18 # Fallback
 
-  async def load_targets_async(self):
+    async def load_targets_async(self):
+        """Reads targets.json asynchronously."""
         try:
             async with aiofiles.open("/root/Arbitrum/targets.json", "r") as f:
                 content = await f.read()
-                self.targets = json.loads(content)
-        except Exception:
+                if content:
+                    self.targets = json.loads(content)
+                else:
+                    self.targets = []
+        except Exception as e:
+            # استفاده از لاگر داخلی برای ردیابی خطا
             self.targets = []
 
     async def get_recommended_gas(self):
