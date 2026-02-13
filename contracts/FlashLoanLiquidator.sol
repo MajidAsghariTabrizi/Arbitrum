@@ -25,10 +25,6 @@ contract FlashLoanLiquidator is FlashLoanSimpleReceiverBase, Ownable {
     
     ISwapRouter public immutable swapRouter;
 
-    // Arbitrum One Addresses
-    address private constant USDC = 0xaf88d065e77c8cC2239327C5EDb3A432268e5831;
-    address private constant WETH = 0x82aF49447D8a07e3bd95BD0d56f35241523fBab1;
-
     constructor(
         address _addressProvider, 
         address _swapRouter
