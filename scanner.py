@@ -97,8 +97,21 @@ def scan_debt_tokens():
     return final_list
 
 if __name__ == "__main__":
-    targets = scan_debt_tokens()
-    
-    with open("targets.json", "w") as f:
-        json.dump(targets, f)
-    print(f"💾 Saved list to 'targets.json'")
+    while True:
+        try:
+            print("\n🔍 Starting new radar scan...")
+            targets = scan_debt_tokens()
+            
+            # ذخیره در آدرس مطلق برای اینکه PM2 گمش نکنه
+            with open("/root/Arbitrum/targets.json", "w") as f:
+                json.dump(targets, f)
+                
+            print(f"💾 Saved {len(targets)} targets to '/root/Arbitrum/targets.json'")
+            
+            # استراحت ۱ دقیقه‌ای تا دفعه بعد
+            print("⏳ Sleeping for 60 seconds...")
+            time.sleep(60)
+            
+        except Exception as e:
+            print(f"❌ Radar Error: {e}")
+            time.sleep(10)
