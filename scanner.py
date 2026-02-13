@@ -12,7 +12,7 @@ if not RPC_URL:
     print("❌ RPC_URL not found in .env")
     exit()
 
-w3 = Web3(Web3.HTTPProvider(RPC_URL))
+w3 = Web3(Web3.HTTPProvider(RPC_URL, request_kwargs={'timeout': 60}))
 
 # --- CONFIGURATION ---
 # Arbitrum Variable Debt Token Addresses
@@ -51,34 +51,39 @@ def scan_debt_tokens():
             # Show progress on same line
             print(f"   ⏳ Block: {chunk_start} | Found: {len(all_users)}", end="\r")
             
-            try:
-                logs = w3.eth.get_logs({
-                    'fromBlock': chunk_start,
-                    'toBlock': chunk_end,
-                    'address': address,
-                    'topics': [TRANSFER_TOPIC]
-                })
-                
-                for log in logs:
-                    if len(log['topics']) >= 3:
-                        # Topic 1 is 'from', Topic 2 is 'to'
-                        # In Debt tokens: 
-                        # - mint (borrow): from=0x0, to=User
-                        # - burn (repay): from=User, to=0x0
-                        addr1 = w3.to_checksum_address("0x" + log['topics'][1].hex()[-40:])
-                        addr2 = w3.to_checksum_address("0x" + log['topics'][2].hex()[-40:])
-                        
-                        # Filter out the zero address (mint/burn origin)
-                        if addr1 != "0x0000000000000000000000000000000000000000":
-                            all_users.add(addr1)
-                        if addr2 != "0x0000000000000000000000000000000000000000":
-                            all_users.add(addr2)
-                
-                time.sleep(0.05) # Rate limit protection
-
-            except Exception as e:
-                # Just skip failed chunks to keep moving
-                pass
+            # Retry Logic for Stability
+            logs = []
+            for attempt in range(3):
+                try:
+                    logs = w3.eth.get_logs({
+                        'fromBlock': chunk_start,
+                        'toBlock': chunk_end,
+                        'address': address,
+                        'topics': [TRANSFER_TOPIC]
+                    })
+                    break # Success
+                except Exception as e:
+                    if attempt < 2:
+                        time.sleep(2)
+                    else:
+                        logs = [] # Give up on this chunk
+            
+            for log in logs:
+                if len(log['topics']) >= 3:
+                    # Topic 1 is 'from', Topic 2 is 'to'
+                    # In Debt tokens: 
+                    # - mint (borrow): from=0x0, to=User
+                    # - burn (repay): from=User, to=0x0
+                    addr1 = w3.to_checksum_address("0x" + log['topics'][1].hex()[-40:])
+                    addr2 = w3.to_checksum_address("0x" + log['topics'][2].hex()[-40:])
+                    
+                    # Filter out the zero address (mint/burn origin)
+                    if addr1 != "0x0000000000000000000000000000000000000000":
+                        all_users.add(addr1)
+                    if addr2 != "0x0000000000000000000000000000000000000000":
+                        all_users.add(addr2)
+            
+            time.sleep(0.05) # Rate limit protection
 
     final_list = list(all_users)
     
@@ -102,8 +107,12 @@ if __name__ == "__main__":
             print("\n🔍 Starting new radar scan...")
             targets = scan_debt_tokens()
             
-            # ذخیره در آدرس مطلق برای اینکه PM2 گمش نکنه
-            with open("/root/Arbitrum/targets.json", "w") as f:
+            # ذخیره در آدرس منعطف (local vs server)
+            target_path = "targets.json"
+            if os.path.exists("/root/Arbitrum"):
+                target_path = "/root/Arbitrum/targets.json"
+                
+            with open(target_path, "w") as f:
                 json.dump(targets, f)
                 
             print(f"💾 Saved {len(targets)} targets to '/root/Arbitrum/targets.json'")
