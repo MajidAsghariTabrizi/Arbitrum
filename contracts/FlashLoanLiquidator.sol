@@ -40,19 +40,28 @@ contract FlashLoanLiquidator is FlashLoanSimpleReceiverBase, Ownable {
     struct LiquidationParams {
         address userToLiquidate;
         address collateralAsset;
+        uint24 fee;
+        uint256 amountOutMinimum;
+        uint160 sqrtPriceLimitX96;
     }
 
     function requestFlashLoan(
         address _userToLiquidate,
         address _debtAsset, // Underlying asset to borrow (e.g. USDC)
         address _collateralAsset, // Collateral to seize (e.g. WETH)
-        uint256 _debtAmount
+        uint256 _debtAmount,
+        uint24 _fee,
+        uint256 _amountOutMinimum,
+        uint160 _sqrtPriceLimitX96
     ) external onlyOwner {
         
         // Encode params to pass to callback
         bytes memory params = abi.encode(LiquidationParams({
             userToLiquidate: _userToLiquidate,
-            collateralAsset: _collateralAsset
+            collateralAsset: _collateralAsset,
+            fee: _fee,
+            amountOutMinimum: _amountOutMinimum,
+            sqrtPriceLimitX96: _sqrtPriceLimitX96
         }));
 
         // Request Flash Loan
@@ -107,12 +116,12 @@ contract FlashLoanLiquidator is FlashLoanSimpleReceiverBase, Ownable {
         ISwapRouter.ExactInputSingleParams memory swapParams = ISwapRouter.ExactInputSingleParams({
             tokenIn: liqParams.collateralAsset,
             tokenOut: asset,
-            fee: 3000, // 0.3% pool, standard for volatile pairs like WETH/USDC. Adjust if needed.
+            fee: liqParams.fee, 
             recipient: address(this),
             deadline: block.timestamp,
             amountIn: collateralBalance,
-            amountOutMinimum: 0, // In production, use a calculated min out for slippage protection
-            sqrtPriceLimitX96: 0
+            amountOutMinimum: liqParams.amountOutMinimum, 
+            sqrtPriceLimitX96: liqParams.sqrtPriceLimitX96
         });
 
         uint256 amountReceived = swapRouter.exactInputSingle(swapParams);
