@@ -15,10 +15,32 @@ if not RPC_URL:
 w3 = Web3(Web3.HTTPProvider(RPC_URL, request_kwargs={'timeout': 60}))
 
 # --- CONFIGURATION ---
-# Arbitrum Variable Debt Token Addresses
-TOKEN_MAP = {
-    "USDC_Debt": "0xFCCf3cAbbe80101232d343252614b6A3eE81C989", # Bridged USDC Debt
-    "WETH_Debt": "0x0c84331e39d6658Cd6e6b9ba04736cC4c4734351"  # WETH Debt
+
+# Aave V3 Arbitrum PoolDataProvider (Checksummed)
+DATA_PROVIDER_ADDRESS = Web3.to_checksum_address("0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654")
+
+# ABI: getReserveTokensAddresses(address asset) -> (aToken, stableDebtToken, variableDebtToken)
+DATA_PROVIDER_ABI = [{
+    "inputs": [{"internalType": "address", "name": "asset", "type": "address"}],
+    "name": "getReserveTokensAddresses",
+    "outputs": [
+        {"internalType": "address", "name": "aTokenAddress", "type": "address"},
+        {"internalType": "address", "name": "stableDebtTokenAddress", "type": "address"},
+        {"internalType": "address", "name": "variableDebtTokenAddress", "type": "address"}
+    ],
+    "stateMutability": "view",
+    "type": "function"
+}]
+
+# Blue-chip underlying assets on Arbitrum One
+UNDERLYING_ASSETS = {
+    "USDC":   "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+    "USDC_e": "0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8",
+    "WETH":   "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+    "WBTC":   "0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f",
+    "USDT":   "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
+    "ARB":    "0x912CE59144191C1204E64559FE8253a0e49E6548",
+    "LINK":   "0xf97f4df75117a78c1A5a0DBb814Af92455853904",
 }
 
 # Transfer Event: Transfer(from, to, value)
@@ -29,20 +51,54 @@ TRANSFER_TOPIC = w3.keccak(text="Transfer(address,address,uint256)").hex()
 TOTAL_BLOCKS_TO_SCAN = 50000   # Check last ~4 hours
 CHUNK_SIZE = 50                # Keep 50 to satisfy Chainstack limits
 
+
+def build_token_map():
+    """Dynamically fetches Variable Debt Token addresses from Aave V3 PoolDataProvider."""
+    data_provider = w3.eth.contract(
+        address=DATA_PROVIDER_ADDRESS,
+        abi=DATA_PROVIDER_ABI
+    )
+    token_map = {}
+    for name, underlying in UNDERLYING_ASSETS.items():
+        try:
+            underlying_cs = Web3.to_checksum_address(underlying)
+            # Returns: (aToken, stableDebtToken, variableDebtToken)
+            result = data_provider.functions.getReserveTokensAddresses(underlying_cs).call()
+            var_debt_token = result[2]
+            # Skip if returned zero address (asset not active on Aave)
+            if var_debt_token == "0x0000000000000000000000000000000000000000":
+                print(f"  ⚠️ {name}: Not active on Aave, skipping.")
+                continue
+            token_map[f"{name}_Debt"] = var_debt_token
+            print(f"  ✅ {name}_Debt -> {var_debt_token}")
+        except Exception as e:
+            print(f"  ❌ Failed to fetch {name} debt token: {e}")
+    return token_map
+
+
 def scan_debt_tokens():
     if not w3.is_connected():
         print("💥 Failed to connect to RPC Node.")
         return []
-    
+
+    # Dynamically build the debt token map from on-chain data
+    print("📡 Fetching Variable Debt Token addresses from PoolDataProvider...")
+    token_map = build_token_map()
+    if not token_map:
+        print("❌ Could not load any debt tokens. Aborting scan.")
+        return []
+    print(f"🎯 Loaded {len(token_map)} debt tokens.\n")
+
     current_block = w3.eth.block_number
     start_block = current_block - TOTAL_BLOCKS_TO_SCAN
     all_users = set()
 
-    print(f"📡 Connected! Scanning Debt Tokens (USDC & WETH)")
+    asset_names = ", ".join(UNDERLYING_ASSETS.keys())
+    print(f"📡 Connected! Scanning Debt Tokens ({asset_names})")
     print(f"⏱️  Range: {start_block} to {current_block} (~4 Hours history)")
 
     # Scan each token
-    for name, address in TOKEN_MAP.items():
+    for name, address in token_map.items():
         print(f"\n🔍 Scanning {name} [{address}]...")
         
         for chunk_start in range(start_block, current_block, CHUNK_SIZE):
