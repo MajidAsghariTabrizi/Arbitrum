@@ -35,6 +35,8 @@ RPC_URL = os.getenv("RPC_URL")
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
 LIQUIDATOR_ADDRESS = os.getenv("LIQUIDATOR_ADDRESS")
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 if not RPC_URL or not PRIVATE_KEY:
     logger.error("❌ Critical Error: Missing RPC_URL or PRIVATE_KEY")
@@ -203,6 +205,22 @@ class AdaptiveSniperBot:
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, lambda: requests.post(DISCORD_WEBHOOK, json=payload))
         except Exception: pass
+
+    async def send_telegram_alert(self, msg):
+        """Sends an HTML-formatted Telegram alert via Bot API (non-blocking)."""
+        if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+            return
+        try:
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            payload = {
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": msg,
+                "parse_mode": "HTML"
+            }
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, lambda: requests.post(url, json=payload, timeout=10))
+        except Exception as e:
+            logger.warning(f"Telegram alert failed: {e}")
 
     async def init_infrastructure(self):
         """Initializes Oracle and Reserve caches."""
@@ -487,7 +505,38 @@ class AdaptiveSniperBot:
             tx_hash = await self.w3.eth.send_raw_transaction(signed_tx.rawTransaction)
             await self.log_system(f"🔥 TX SENT: {tx_hash.hex()}", "success")
             
-            # await self.log_system(f"🔫 Simulation: Would send TX for {user}. Gas: {max_fee}", "success")
+            # Monitor TX receipt
+            try:
+                receipt = await self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=30)
+                gas_used = receipt['gasUsed']
+                effective_gas_price = receipt['effectiveGasPrice']
+                gas_cost_eth = Decimal(gas_used * effective_gas_price) / Decimal(10**18)
+                arbiscan_link = f"https://arbiscan.io/tx/{tx_hash.hex()}"
+                
+                if receipt['status'] == 1:
+                    # SUCCESS
+                    alert_msg = (
+                        f"🟢 <b>Liquidation SUCCESS</b>\n"
+                        f"🎯 Target: <code>{user}</code>\n"
+                        f"💰 Est. Debt Value: ~${float(debt_val / Decimal(10**8)):.2f}\n"
+                        f"⛽ Gas Cost: {gas_cost_eth:.6f} ETH\n"
+                        f"🔗 <a href='{arbiscan_link}'>View on Arbiscan</a>"
+                    )
+                    await self.log_system(f"✅ TX CONFIRMED: {tx_hash.hex()} | Gas: {gas_cost_eth:.6f} ETH", "success")
+                else:
+                    # REVERTED
+                    alert_msg = (
+                        f"🟡 <b>TX REVERTED</b>\n"
+                        f"🎯 Target: <code>{user}</code>\n"
+                        f"💸 Gas Wasted: {gas_cost_eth:.6f} ETH\n"
+                        f"🔗 <a href='{arbiscan_link}'>View on Arbiscan</a>"
+                    )
+                    await self.log_system(f"❌ TX REVERTED: {tx_hash.hex()} | Gas Wasted: {gas_cost_eth:.6f} ETH", "error")
+                
+                await self.send_telegram_alert(alert_msg)
+                
+            except Exception as receipt_err:
+                await self.log_system(f"⚠️ Receipt timeout/error: {receipt_err}", "warning")
             
         except Exception as e:
             await self.log_system(f"Tx Build Failed: {e}", "error")
@@ -544,9 +593,20 @@ class AdaptiveSniperBot:
             if elapsed < 0.5:
                 await asyncio.sleep(0.5)
 
+    async def _run_with_alerts(self):
+        """Wraps worker_loop with Telegram startup & crash alerts."""
+        await self.send_telegram_alert("🟢 <b>Bot Started:</b> Scanning the market.")
+        try:
+            await self.worker_loop()
+        except Exception as e:
+            crash_msg = f"🆘 <b>CRASH ALERT:</b> <code>{e}</code>"
+            await self.send_telegram_alert(crash_msg)
+            await self.log_system(f"💥 FATAL CRASH: {e}", "error")
+            raise
+
     def run(self):
         try:
-            asyncio.run(self.worker_loop())
+            asyncio.run(self._run_with_alerts())
         except KeyboardInterrupt:
             print("\n🛑 Bot Stopped.")
 
