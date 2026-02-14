@@ -524,15 +524,20 @@ class AdaptiveSniperBot:
             tasks = [self.check_user_health(user) for user in self.targets]
             results = await asyncio.gather(*tasks)
 
+            # 🚀 Concurrent Execution: fire all liquidations simultaneously
+            liquidation_tasks = []
             for user, hf in results:
-                # ⚠️ PRODUCTION: Change threshold to `hf < 1.0` for real liquidations.
-                # Current value `hf < 3.0` is for DRY-RUN / SIMULATION testing only.
+                # ⚠️ PRODUCTION: threshold is `hf < 1.0` for real liquidations.
                 if hf and hf < 1.0:
-                    await self.log_system(f"🧪 TEST MODE TRIGGERED FOR {user} | HF: {hf:.4f}", "info")
-                    await self.execute_liquidation(user)
+                    await self.log_system(f"🎯 LIQUIDATABLE: {user} | HF: {hf:.4f}", "info")
+                    liquidation_tasks.append(self.execute_liquidation(user))
                 elif hf and hf < 1.02:
                     # Pre-load data for risky users?
                     pass
+
+            if liquidation_tasks:
+                await self.log_system(f"⚡ Firing {len(liquidation_tasks)} concurrent liquidation(s)...", "warning")
+                await asyncio.gather(*liquidation_tasks, return_exceptions=True)
 
 
             elapsed = time.time() - start_time

@@ -76,6 +76,23 @@ def build_token_map():
     return token_map
 
 
+def get_target_path():
+    """Returns the correct targets.json path (server vs local)."""
+    if os.path.exists("/root/Arbitrum"):
+        return "/root/Arbitrum/targets.json"
+    return "targets.json"
+
+
+def save_targets_atomic(targets_list):
+    """Atomically writes targets to JSON using temp file + os.replace().
+    Prevents JSON decode errors if the bot reads during a write."""
+    target_path = get_target_path()
+    temp_path = target_path + ".tmp"
+    with open(temp_path, "w") as f:
+        json.dump(targets_list, f)
+    os.replace(temp_path, target_path)
+
+
 def scan_debt_tokens():
     if not w3.is_connected():
         print("💥 Failed to connect to RPC Node.")
@@ -97,7 +114,7 @@ def scan_debt_tokens():
     print(f"📡 Connected! Scanning Debt Tokens ({asset_names})")
     print(f"⏱️  Range: {start_block} to {current_block} (~4 Hours history)")
 
-    # Scan each token
+    # Scan each token (Progressive Feeding: save after each token)
     for name, address in token_map.items():
         print(f"\n🔍 Scanning {name} [{address}]...")
         
@@ -141,6 +158,12 @@ def scan_debt_tokens():
             
             time.sleep(0.05) # Rate limit protection
 
+        # 🚀 Progressive Feeding: flush targets to disk after each token scan
+        # Cache Retention: only write if we have targets
+        if len(all_users) > 0:
+            save_targets_atomic(list(all_users))
+            print(f"\n   💾 Progressive save: {len(all_users)} targets flushed to disk.")
+
     final_list = list(all_users)
     
     # --- FALLBACK MECHANISM ---
@@ -163,16 +186,10 @@ if __name__ == "__main__":
             print("\n🔍 Starting new radar scan...")
             targets = scan_debt_tokens()
             
-            # Cache Retention: only overwrite if we got fresh targets
+            # Final atomic save (Cache Retention: only if we have targets)
             if len(targets) > 0:
-                target_path = "targets.json"
-                if os.path.exists("/root/Arbitrum"):
-                    target_path = "/root/Arbitrum/targets.json"
-                    
-                with open(target_path, "w") as f:
-                    json.dump(targets, f)
-                    
-                print(f"💾 Saved {len(targets)} targets to '{target_path}'")
+                save_targets_atomic(targets)
+                print(f"💾 Final save: {len(targets)} targets to '{get_target_path()}'")
             else:
                 print("⚠️ Scan returned 0 targets. Keeping previous targets in cache.")
             
