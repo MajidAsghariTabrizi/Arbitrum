@@ -163,17 +163,19 @@ if __name__ == "__main__":
             print("\n🔍 Starting new radar scan...")
             targets = scan_debt_tokens()
             
-            # ذخیره در آدرس منعطف (local vs server)
-            target_path = "targets.json"
-            if os.path.exists("/root/Arbitrum"):
-                target_path = "/root/Arbitrum/targets.json"
-                
-            with open(target_path, "w") as f:
-                json.dump(targets, f)
-                
-            print(f"💾 Saved {len(targets)} targets to '/root/Arbitrum/targets.json'")
+            # Cache Retention: only overwrite if we got fresh targets
+            if len(targets) > 0:
+                target_path = "targets.json"
+                if os.path.exists("/root/Arbitrum"):
+                    target_path = "/root/Arbitrum/targets.json"
+                    
+                with open(target_path, "w") as f:
+                    json.dump(targets, f)
+                    
+                print(f"💾 Saved {len(targets)} targets to '{target_path}'")
+            else:
+                print("⚠️ Scan returned 0 targets. Keeping previous targets in cache.")
             
-            # استراحت ۱ دقیقه‌ای تا دفعه بعد
             print("⏳ Sleeping for 60 seconds...")
             time.sleep(60)
             
