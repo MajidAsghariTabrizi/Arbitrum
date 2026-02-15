@@ -8,7 +8,7 @@ import warnings
 from decimal import Decimal
 import aiofiles
 import requests
-from web3 import AsyncWeb3, WebSocketProvider
+from web3 import AsyncWeb3
 from dotenv import load_dotenv
 
 # Suppress ResourceWarning for cleaner logs
@@ -37,9 +37,8 @@ except ImportError:
 # Configuration Constants
 WSS_URL = os.getenv("WSS_URL")
 if not WSS_URL:
-    # Fallback to HTTP if WSS not set, but warn heavily
-    logger.warning("⚠️ WSS_URL not found! Using PRIMARY_RPC (HTTP polling mode). Latency will be high.")
-    WSS_URL = os.getenv("PRIMARY_RPC")
+    logger.error("❌ WSS_URL not found in .env! Required for WebSocket mode.")
+    exit(1)
 
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
 LIQUIDATOR_ADDRESS = os.getenv("LIQUIDATOR_ADDRESS")
@@ -57,7 +56,7 @@ POOL_ADDRESSES_PROVIDER = AsyncWeb3.to_checksum_address("0xa97684ead0e402dC232d5
 DATA_PROVIDER_ADDRESS = AsyncWeb3.to_checksum_address("0x69fa688f1dc47d4b5d8029d5a35fb7a548310654")
 QUOTER_V2_ADDRESS = AsyncWeb3.to_checksum_address("0x61fFE014bA17989E743c5F6cB21bF9697530B21e")
 
-# ABIs (Condensed for brevity but functional)
+# ABIs
 POOL_ABI = [{
     "inputs": [{"internalType": "address", "name": "user", "type": "address"}],
     "name": "getUserAccountData",
@@ -145,68 +144,59 @@ ERC20_ABI = [{
 
 class GravitySniperWSS:
     def __init__(self):
-        # WSS Connection initialized in run() until connected
+        # WSS Connection — set inside persistent_websocket context
         self.w3 = None
         self.account = None
-        
-        # Contracts
+
+        # Contracts — initialized after w3 is ready
         self.pool = None
         self.data_provider = None
         self.addresses_provider = None
         self.liquidator_contract = None
         self.oracle_contract = None
-        
+
         # Data
         self.targets = []
         self.reserves_list = []
-        self.asset_decimals = {} 
+        self.asset_decimals = {}
         self.prices = {}
-        
+
         # Concurrency & State
         self.running = True
-        self.semaphore = asyncio.Semaphore(5) # Max 5 concurrent checks per block
-        self.nonce_lock = asyncio.Lock() # Nonce safety
+        self.semaphore = asyncio.Semaphore(5)
+        self.nonce_lock = asyncio.Lock()
         self._last_errors = {}
-        
-    async def init_connection(self):
-        """Initializes AsyncWeb3 with WSS Provider."""
-        logger.info(f"🔌 Connecting to WSS: {WSS_URL[:25]}...")
-        
-        if "http" in WSS_URL:
-            self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(WSS_URL))
-        else:
-            # Standard AsyncWebsocketProvider
-            self.w3 = AsyncWeb3(WebSocketProvider(WSS_URL))
-            
-        if not await self.w3.is_connected():
-            raise ConnectionError("❌ Failed to connect to WSS/RPC")
-            
+
+    async def init_contracts(self):
+        """Initialize all contracts after w3 is ready inside the WSS context."""
         self.account = self.w3.eth.account.from_key(PRIVATE_KEY)
-        logger.info(f"🔑 Loaded Liquidator: {self.account.address}")
-        
-        # Init Contracts
+        logger.info(f"🔑 Loaded Liquidator Wallet: {self.account.address}")
+
         self.pool = self.w3.eth.contract(address=POOL_ADDRESS, abi=POOL_ABI)
         self.data_provider = self.w3.eth.contract(address=DATA_PROVIDER_ADDRESS, abi=DATA_PROVIDER_ABI)
         self.addresses_provider = self.w3.eth.contract(address=POOL_ADDRESSES_PROVIDER, abi=ADDRESSES_PROVIDER_ABI)
         self.liquidator_contract = self.w3.eth.contract(address=LIQUIDATOR_ADDRESS, abi=LIQUIDATOR_ABI)
-        
-        # Init Oracle
+
+        # Fetch Oracle address dynamically
         oracle_addr = await self.addresses_provider.functions.getPriceOracle().call()
         self.oracle_contract = self.w3.eth.contract(address=oracle_addr, abi=ORACLE_ABI)
-        
-        # Load Reserves
+
+        # Cache reserves list
         self.reserves_list = await self.pool.functions.getReservesList().call()
         logger.info(f"📚 Loaded {len(self.reserves_list)} market assets.")
 
     async def log_system(self, msg, level="info"):
-        if level == "error": logger.error(msg)
-        elif level == "warning": logger.warning(msg)
-        else: logger.info(msg)
-        
+        if level == "error":
+            logger.error(msg)
+        elif level == "warning":
+            logger.warning(msg)
+        else:
+            logger.info(msg)
+
         if DB_ENABLED:
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, db_manager.log_event, level, msg)
-            
+
         if DISCORD_WEBHOOK and (level == "success" or level == "error"):
             await self.send_discord_alert(msg, level)
 
@@ -216,12 +206,14 @@ class GravitySniperWSS:
             payload = {"embeds": [{"title": "🦅 Gravity WSS Sniper", "description": msg, "color": color}]}
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, lambda: requests.post(DISCORD_WEBHOOK, json=payload))
-        except Exception: pass
+        except Exception:
+            pass
 
     async def send_telegram_alert(self, msg, is_error=False):
-        if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID: return
-        
-        # Anti-spam
+        if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+            return
+
+        # Anti-spam: skip duplicate error alerts within cooldown period
         if is_error:
             error_key = msg[:100]
             now = time.time()
@@ -234,10 +226,11 @@ class GravitySniperWSS:
             payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, lambda: requests.post(url, json=payload, timeout=10))
-        except Exception: pass
+        except Exception:
+            pass
 
     async def update_prices(self):
-        """Updates asset prices in bulk."""
+        """Updates asset prices in bulk from Aave Oracle."""
         try:
             prices = await self.oracle_contract.functions.getAssetsPrices(self.reserves_list).call()
             for i, asset in enumerate(self.reserves_list):
@@ -246,27 +239,34 @@ class GravitySniperWSS:
             logger.warning(f"Price update failed: {e}")
 
     async def get_decimals(self, token):
-        if token in self.asset_decimals: return self.asset_decimals[token]
+        if token in self.asset_decimals:
+            return self.asset_decimals[token]
         try:
             checksum_token = self.w3.to_checksum_address(token)
             erc20 = self.w3.eth.contract(address=checksum_token, abi=ERC20_ABI)
             decimals = await erc20.functions.decimals().call()
             self.asset_decimals[token] = decimals
             return decimals
-        except: return 18
+        except Exception:
+            return 18
 
     async def load_targets_async(self):
-        """Reloads targets.json."""
+        """Reloads targets.json asynchronously."""
         try:
             path = "/root/Arbitrum/targets.json" if os.path.exists("/root/Arbitrum") else "targets.json"
             async with aiofiles.open(path, mode='r') as f:
                 content = await f.read()
-                if content: self.targets = json.loads(content)
-        except: self.targets = []
+                if content:
+                    self.targets = json.loads(content)
+                else:
+                    self.targets = []
+        except Exception:
+            self.targets = []
 
     async def analyze_user_assets(self, user):
-        """Finds best debt and collateral for liquidatable user."""
-        if not self.prices: await self.update_prices()
+        """Finds best debt and collateral for a liquidatable user."""
+        if not self.prices:
+            await self.update_prices()
 
         best_debt = None
         best_collateral = None
@@ -274,16 +274,20 @@ class GravitySniperWSS:
         max_collateral_value = Decimal(0)
         debt_amount_raw = 0
 
-        # Create tasks
-        tasks = [self.data_provider.functions.getUserReserveData(asset, user).call() for asset in self.reserves_list]
+        tasks = [
+            self.data_provider.functions.getUserReserveData(asset, user).call()
+            for asset in self.reserves_list
+        ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         for i, res in enumerate(results):
-            if isinstance(res, Exception): continue
-            
+            if isinstance(res, Exception):
+                continue
+
             asset = self.reserves_list[i]
             price = self.prices.get(asset, 0)
-            if price == 0: continue
+            if price == 0:
+                continue
 
             # Collateral (Index 0)
             collateral_bal = res[0]
@@ -294,7 +298,7 @@ class GravitySniperWSS:
                     max_collateral_value = value_usd
                     best_collateral = asset
 
-            # Debt (Variable Index 2)
+            # Debt — Variable (Index 2)
             variable_debt = res[2]
             if variable_debt > 0:
                 decimals = await self.get_decimals(asset)
@@ -307,42 +311,51 @@ class GravitySniperWSS:
         return best_debt, best_collateral, debt_amount_raw, max_debt_value
 
     async def execute_liquidation(self, user):
-        """Builds and sends Flash Loan execution."""
+        """Builds, signs, and sends Flash Loan liquidation transaction."""
         debt_asset, collateral_asset, debt_amount, debt_val = await self.analyze_user_assets(user)
-        
+
         if not debt_asset or not collateral_asset or debt_val < 50:
             return
 
-        # V1 HIGH-LIQUIDITY SAFETY: Only target USDC/WETH pairs if possible for stability
-        # But for now, trust analysis logic.
         logger.info(f"⚔️ SNIPING: {user} | Debt: ${debt_val:.2f}")
 
         # Params
-        fee = 3000
-        amount_out_min = 0 # TODO: Slippage calc
+        fee = 3000          # 0.3% Uniswap fee tier
+        amount_out_min = 0  # TODO: Slippage calc
         sqrt_price_limit = 0
-        
+
         # Build TX Function
         tx_func = self.liquidator_contract.functions.requestFlashLoan(
-            user, debt_asset, collateral_asset, int(debt_amount), fee, int(amount_out_min), int(sqrt_price_limit)
+            user,
+            debt_asset,
+            collateral_asset,
+            int(debt_amount),
+            fee,
+            int(amount_out_min),
+            int(sqrt_price_limit)
         )
-        
+
         try:
-            # NONCE MANAGEMENT with LOCK
-            # Prevents multiple transactions in same block from re-using nonce
+            # ============================================================
+            # NONCE LOCK — prevents "nonce too low" when multiple targets
+            # are liquidatable in the same block
+            # ============================================================
             async with self.nonce_lock:
                 nonce = await self.w3.eth.get_transaction_count(self.account.address)
-                
-                # Gas Estimation
-                gas_est = await tx_func.estimate_gas({'from': self.account.address})
-                gas_limit = int(gas_est * 1.2)
-                
+
+                # Gas Estimation (with safe fallback)
+                try:
+                    gas_est = await tx_func.estimate_gas({'from': self.account.address})
+                    gas_limit = int(gas_est * 1.2)
+                except Exception:
+                    gas_limit = 2500000  # Safe fallback for flash loans
+
                 # EIP-1559 Fees
                 block = await self.w3.eth.get_block('latest')
                 base_fee = block['baseFeePerGas']
-                priority = self.w3.to_wei(0.5, 'gwei') # Moderate priority for WSS
+                priority = self.w3.to_wei(0.5, 'gwei')
                 max_fee = base_fee + priority
-                
+
                 tx = await tx_func.build_transaction({
                     'from': self.account.address,
                     'nonce': nonce,
@@ -351,85 +364,139 @@ class GravitySniperWSS:
                     'gas': gas_limit,
                     'chainId': 42161
                 })
-                
+
                 signed = self.account.sign_transaction(tx)
-                tx_hash = await self.w3.eth.send_raw_transaction(signed.rawTransaction)
-            
-            await self.log_system(f"🔥 SENT: {tx_hash.hex()}", "success")
-            await self.send_telegram_alert(f"🚀 <b>Liquidation Sent:</b> {user}\nTX: {tx_hash.hex()}")
-            
+                tx_hash = await self.w3.eth.send_raw_transaction(signed.raw_transaction)
+
+            # --- Post-send logging (outside lock to release nonce ASAP) ---
+            tx_hex = tx_hash.hex()
+            arbiscan_link = f"https://arbiscan.io/tx/{tx_hex}"
+
+            await self.log_system(f"🔥 TX SENT: {tx_hex}", "success")
+            await self.send_telegram_alert(
+                f"🚀 <b>Liquidation Sent</b>\n"
+                f"🎯 Target: <code>{user}</code>\n"
+                f"💰 Debt: ~${float(debt_val):.2f}\n"
+                f"🔗 <a href='{arbiscan_link}'>View on Arbiscan</a>"
+            )
+
+            # Monitor receipt (non-blocking, best-effort)
+            try:
+                receipt = await self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=30)
+                gas_used = receipt['gasUsed']
+                effective_gas_price = receipt['effectiveGasPrice']
+                gas_cost_eth = Decimal(gas_used * effective_gas_price) / Decimal(10**18)
+
+                if receipt['status'] == 1:
+                    await self.log_system(f"✅ TX CONFIRMED: {tx_hex} | Gas: {gas_cost_eth:.6f} ETH", "success")
+                    await self.send_telegram_alert(
+                        f"🟢 <b>Liquidation SUCCESS</b>\n"
+                        f"⛽ Gas: {gas_cost_eth:.6f} ETH\n"
+                        f"🔗 <a href='{arbiscan_link}'>Arbiscan</a>"
+                    )
+                else:
+                    await self.log_system(f"❌ TX REVERTED: {tx_hex}", "error")
+                    await self.send_telegram_alert(
+                        f"🟡 <b>TX REVERTED</b>\n"
+                        f"💸 Gas Wasted: {gas_cost_eth:.6f} ETH\n"
+                        f"🔗 <a href='{arbiscan_link}'>Arbiscan</a>"
+                    )
+            except Exception as receipt_err:
+                await self.log_system(f"Receipt Monitor Error: {receipt_err}", "warning")
+
         except Exception as e:
-            await self.log_system(f"Execution Failed: {e}", "error")
+            await self.log_system(f"Execution Failed for {user}: {e}", "error")
+            await self.send_telegram_alert(
+                f"⚠️ <b>Execution Failed</b> for <code>{user}</code>:\n<code>{e}</code>",
+                is_error=True
+            )
 
     async def check_user_health(self, user):
         """Concurrent health check protected by Semaphore."""
         async with self.semaphore:
             try:
                 data = await self.pool.functions.getUserAccountData(user).call()
-                # hf is index 5, 1e18 scale
                 hf = Decimal(data[5]) / Decimal(10**18)
-                
-                if hf < 1.05 and hf > 0: # Warning zone
-                    if hf < 1.0:
-                        logger.info(f"💀 LIQUIDATABLE: {user} (HF: {hf})")
-                        await self.execute_liquidation(user)
-                    else:
-                        # Just log low HF for debugging/monitoring
-                        pass 
+
+                if hf < 1.0 and hf > 0:
+                    logger.info(f"💀 LIQUIDATABLE: {user} (HF: {hf})")
+                    await self.execute_liquidation(user)
             except Exception:
                 pass
 
-    async def on_new_block(self, block_header):
+    async def on_new_block(self, block_number):
         """Event Handler: Triggered on every new WSS block header."""
         start_time = time.time()
-        
-        # 1. Update Prices first (critical for accurate liquidation calc)
-        await self.update_prices()
-        
-        # 2. Reload targets (async fast read)
-        await self.load_targets_async()
-        if not self.targets: return
 
-        # 3. Concurrent Health Checks
-        # We spawn tasks for all targets, but semaphore limits active WSS requests
+        # 1. Update Prices
+        await self.update_prices()
+
+        # 2. Reload targets
+        await self.load_targets_async()
+        if not self.targets:
+            return
+
+        # 3. Concurrent Health Checks (semaphore limits to 5 active)
         tasks = [self.check_user_health(user) for user in self.targets]
         await asyncio.gather(*tasks)
-        
+
         elapsed = (time.time() - start_time) * 1000
-        logger.info(f"🧱 Block {block_header['number']} processed. {len(self.targets)} targets in {elapsed:.0f}ms")
+        logger.info(f"🧱 Block {block_number} scanned. {len(self.targets)} targets in {elapsed:.0f}ms")
 
     async def run_forever(self):
-        """Main WSS Loop with Reconnection (Manual implementation)."""
+        """Main WSS Loop using Web3.py v6 persistent_websocket context manager."""
         while True:
             try:
-                await self.init_connection()
-                await self.send_telegram_alert("🟢 <b>WSS Sniper Started</b>")
-                
-                # Subscribe to newHeads
-                subscription_id = await self.w3.eth.subscribe('newHeads')
-                logger.info(f"✅ Subscribed to newHeads (ID: {subscription_id})")
+                logger.info(f"🔌 Connecting to WSS: {WSS_URL[:40]}...")
 
-                # Listen for events - manual iterator for older web3 compatibility
-                # For newer web3 (6.x+), use process_subscriptions or manual recv
-                async for response in self.w3.socket.process_subscriptions():
-                    try:
-                        header = response.get('result', {})
-                        # Some providers wrap differently; handle robustly
-                        if not header and 'params' in response:
-                            header = response['params'].get('result', {})
+                # ============================================================
+                # Web3.py v6+ PERSISTENT WEBSOCKET CONTEXT MANAGER
+                # This is the ONLY supported way to use async WSS in v6.
+                # The context manager handles connection lifecycle, keepalive,
+                # and clean teardown automatically.
+                # ============================================================
+                async with AsyncWeb3.persistent_websocket(WSS_URL) as w3:
+                    self.w3 = w3
+                    logger.info("🟢 WSS Connected Successfully!")
 
-                        if 'number' in header:
-                            # Parse hex block number if needed
-                            if isinstance(header['number'], str):
-                                header['number'] = int(header['number'], 16)
-                            await self.on_new_block(header)
-                    except Exception as loop_err:
-                        logger.error(f"Event Loop Error: {loop_err}")
+                    # Initialize all contracts now that w3 is live
+                    await self.init_contracts()
+
+                    await self.send_telegram_alert("🟢 <b>WSS Sniper Started</b>")
+
+                    # Subscribe to newHeads
+                    subscription_id = await self.w3.eth.subscribe('newHeads')
+                    logger.info(f"✅ Subscribed to newHeads (ID: {subscription_id})")
+
+                    # ============================================================
+                    # EVENT LOOP — process_subscriptions yields each new block
+                    # header as it arrives over the persistent WSS connection.
+                    # ============================================================
+                    async for response in self.w3.ws.process_subscriptions():
+                        try:
+                            # Extract block header from response
+                            header = response.get('result', {})
+                            if not header and 'params' in response:
+                                header = response['params'].get('result', {})
+
+                            if 'number' in header:
+                                block_num = header['number']
+                                # Parse hex block number if needed
+                                if isinstance(block_num, str):
+                                    block_num = int(block_num, 16)
+                                await self.on_new_block(block_num)
+                        except Exception as loop_err:
+                            logger.error(f"Block Processing Error: {loop_err}")
 
             except Exception as e:
                 logger.error(f"🔌 WSS Connection Lost: {e}")
-                await self.send_telegram_alert(f"⚠️ <b>WSS Disconnected:</b> {e}", is_error=True)
-                await asyncio.sleep(5) # Reconnect delay
+                await self.send_telegram_alert(
+                    f"⚠️ <b>WSS Disconnected:</b> <code>{e}</code>",
+                    is_error=True
+                )
+                # Reconnect delay — prevents rapid reconnect spam
+                await asyncio.sleep(5)
+
 
 if __name__ == "__main__":
     bot = GravitySniperWSS()
