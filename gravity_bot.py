@@ -2,7 +2,6 @@ import os
 import json
 import asyncio
 import logging
-import re
 import time
 import warnings
 from decimal import Decimal
@@ -24,7 +23,7 @@ load_dotenv(ENV_PATH)
 
 # Logging Setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
-logger = logging.getLogger("WSS_Sniper")
+logger = logging.getLogger("GravityBot")
 
 # Database & Notification Setup
 try:
@@ -35,20 +34,24 @@ except ImportError:
     logger.warning("⚠️ db_manager.py not found. Dashboard logging disabled.")
 
 # Configuration Constants
-WSS_URL = os.getenv("WSS_URL")
-if not WSS_URL:
-    logger.error("❌ WSS_URL not found in .env! Required for WebSocket mode.")
-    exit(1)
-
+PRIMARY_RPC = os.getenv("PRIMARY_RPC")
+FALLBACK_RPCS = [r.strip() for r in os.getenv("FALLBACK_RPCS", "").split(",") if r.strip()]
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
 LIQUIDATOR_ADDRESS = os.getenv("LIQUIDATOR_ADDRESS")
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
+if not PRIMARY_RPC:
+    logger.error("❌ Critical Error: Missing PRIMARY_RPC in .env")
+    exit(1)
 if not PRIVATE_KEY or not LIQUIDATOR_ADDRESS:
     logger.error("❌ Critical Error: Missing PRIVATE_KEY or LIQUIDATOR_ADDRESS in .env")
     exit(1)
+
+# Polling Config
+POLL_INTERVAL = 0.1         # 100ms — check for new blocks rapidly
+HEALTH_CHECK_DELAY = 0.2    # 200ms between each sequential health check
 
 # Arbitrum One Addresses (EIP-55 Checksummed)
 POOL_ADDRESS = AsyncWeb3.to_checksum_address("0x794a61358D6845594F94dc1DB02A252b5b4814aD")
@@ -140,15 +143,51 @@ ERC20_ABI = [{
 }]
 
 
-# --- 2. ASYNC BOT CLASS ---
+# --- 2. ASYNC RPC MANAGER ---
 
-class GravitySniperWSS:
+class AsyncRPCManager:
+    """Manages RPC endpoints with automatic failover."""
     def __init__(self):
-        # WSS Connection — set inside persistent_websocket context
+        self.endpoints = [PRIMARY_RPC] + FALLBACK_RPCS
+        self.current_index = 0
+        self.strike_count = 0
+        self.last_rate_limit = 0
         self.w3 = None
+
+    async def connect(self):
+        """Connect to the current RPC endpoint."""
+        url = self.endpoints[self.current_index]
+        logger.info(f"🔌 Connecting to RPC: {url[:40]}...")
+        self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(url))
+        if not await self.w3.is_connected():
+            raise ConnectionError(f"❌ Failed to connect to {url}")
+        logger.info(f"🟢 Connected to RPC [{self.current_index + 1}/{len(self.endpoints)}]")
+
+    async def handle_rate_limit(self):
+        """Handle 429 errors with adaptive backoff and failover."""
+        self.strike_count += 1
+        self.last_rate_limit = time.time()
+
+        if self.strike_count >= 3:
+            self.strike_count = 0
+            self.current_index = (self.current_index + 1) % len(self.endpoints)
+            logger.warning(f"🔄 3 strikes! Switching to RPC [{self.current_index + 1}/{len(self.endpoints)}]")
+            await self.connect()
+        else:
+            cooldown = 30
+            logger.warning(f"⏳ Rate limited (Strike {self.strike_count}/3). Cooling down {cooldown}s...")
+            await asyncio.sleep(cooldown)
+
+
+# --- 3. ASYNC BOT CLASS ---
+
+class GravityBot:
+    def __init__(self):
+        # RPC Manager
+        self.rpc = AsyncRPCManager()
         self.account = None
 
-        # Contracts — initialized after w3 is ready
+        # Contracts
         self.pool = None
         self.data_provider = None
         self.addresses_provider = None
@@ -161,16 +200,21 @@ class GravitySniperWSS:
         self.asset_decimals = {}
         self.prices = {}
 
-        # Concurrency & State
-        self.running = True
-        self.semaphore = asyncio.Semaphore(5)
+        # Block Tracking
+        self.last_processed_block = 0
+
+        # Concurrency
         self.nonce_lock = asyncio.Lock()
         self._last_errors = {}
 
+    @property
+    def w3(self):
+        return self.rpc.w3
+
     async def init_contracts(self):
-        """Initialize all contracts after w3 is ready inside the WSS context."""
+        """Initialize all contracts after RPC is connected."""
         self.account = self.w3.eth.account.from_key(PRIVATE_KEY)
-        logger.info(f"🔑 Loaded Liquidator Wallet: {self.account.address}")
+        logger.info(f"🔑 Loaded Wallet: {self.account.address}")
 
         self.pool = self.w3.eth.contract(address=POOL_ADDRESS, abi=POOL_ABI)
         self.data_provider = self.w3.eth.contract(address=DATA_PROVIDER_ADDRESS, abi=DATA_PROVIDER_ABI)
@@ -203,7 +247,7 @@ class GravitySniperWSS:
     async def send_discord_alert(self, msg, level):
         try:
             color = 0x00ff00 if level == "success" else 0xff0000
-            payload = {"embeds": [{"title": "🦅 Gravity WSS Sniper", "description": msg, "color": color}]}
+            payload = {"embeds": [{"title": "🦅 Gravity Bot", "description": msg, "color": color}]}
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, lambda: requests.post(DISCORD_WEBHOOK, json=payload))
         except Exception:
@@ -213,7 +257,7 @@ class GravitySniperWSS:
         if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
             return
 
-        # Anti-spam: skip duplicate error alerts within cooldown period
+        # Anti-spam: skip duplicate error alerts within 5-minute cooldown
         if is_error:
             error_key = msg[:100]
             now = time.time()
@@ -412,20 +456,21 @@ class GravitySniperWSS:
             )
 
     async def check_user_health(self, user):
-        """Concurrent health check protected by Semaphore."""
-        async with self.semaphore:
-            try:
-                data = await self.pool.functions.getUserAccountData(user).call()
-                hf = Decimal(data[5]) / Decimal(10**18)
+        """Sequential health check for a single user."""
+        try:
+            data = await self.pool.functions.getUserAccountData(user).call()
+            hf = Decimal(data[5]) / Decimal(10**18)
 
-                if hf < 1.0 and hf > 0:
-                    logger.info(f"💀 LIQUIDATABLE: {user} (HF: {hf})")
-                    await self.execute_liquidation(user)
-            except Exception:
-                pass
+            if hf < 1.0 and hf > 0:
+                logger.info(f"💀 LIQUIDATABLE: {user} (HF: {hf})")
+                await self.execute_liquidation(user)
+        except Exception as e:
+            err_str = str(e).lower()
+            if "429" in err_str or "rate" in err_str:
+                await self.rpc.handle_rate_limit()
 
-    async def on_new_block(self, block_number):
-        """Event Handler: Triggered on every new WSS block header."""
+    async def process_block(self, block_number):
+        """Process a single new block: update prices, check all targets sequentially."""
         start_time = time.time()
 
         # 1. Update Prices
@@ -436,70 +481,62 @@ class GravitySniperWSS:
         if not self.targets:
             return
 
-        # 3. Concurrent Health Checks (semaphore limits to 5 active)
-        tasks = [self.check_user_health(user) for user in self.targets]
-        await asyncio.gather(*tasks)
+        # 3. Sequential Health Checks with throttle
+        for user in self.targets:
+            await self.check_user_health(user)
+            await asyncio.sleep(HEALTH_CHECK_DELAY)
 
         elapsed = (time.time() - start_time) * 1000
         logger.info(f"🧱 Block {block_number} scanned. {len(self.targets)} targets in {elapsed:.0f}ms")
 
     async def run_forever(self):
-        """Main WSS Loop using Web3.py v6 persistent_websocket context manager."""
+        """Main Smart HTTP Polling Loop — tracks new blocks and processes them."""
+        # Connect and initialize
+        await self.rpc.connect()
+        await self.init_contracts()
+
+        await self.send_telegram_alert("🟢 <b>Gravity Bot Started (HTTP Polling)</b>")
+        logger.info("🚀 Smart HTTP Polling Engine started.")
+
+        # Seed the block tracker
+        self.last_processed_block = await self.w3.eth.block_number
+        logger.info(f"📍 Starting from block: {self.last_processed_block}")
+
+        # ============================================================
+        # SMART POLLING LOOP
+        # - Checks for new blocks every POLL_INTERVAL (100ms)
+        # - Only processes when a genuinely new block is detected
+        # - Handles RPC failures with reconnect logic
+        # ============================================================
         while True:
             try:
-                logger.info(f"🔌 Connecting to WSS: {WSS_URL[:40]}...")
+                current_block = await self.w3.eth.block_number
 
-                # ============================================================
-                # Web3.py v6+ PERSISTENT WEBSOCKET CONTEXT MANAGER
-                # This is the ONLY supported way to use async WSS in v6.
-                # The context manager handles connection lifecycle, keepalive,
-                # and clean teardown automatically.
-                # ============================================================
-                async with AsyncWeb3.persistent_websocket(WSS_URL) as w3:
-                    self.w3 = w3
-                    logger.info("🟢 WSS Connected Successfully!")
-
-                    # Initialize all contracts now that w3 is live
-                    await self.init_contracts()
-
-                    await self.send_telegram_alert("🟢 <b>WSS Sniper Started</b>")
-
-                    # Subscribe to newHeads
-                    subscription_id = await self.w3.eth.subscribe('newHeads')
-                    logger.info(f"✅ Subscribed to newHeads (ID: {subscription_id})")
-
-                    # ============================================================
-                    # EVENT LOOP — process_subscriptions yields each new block
-                    # header as it arrives over the persistent WSS connection.
-                    # ============================================================
-                    async for response in self.w3.ws.process_subscriptions():
-                        try:
-                            # Extract block header from response
-                            header = response.get('result', {})
-                            if not header and 'params' in response:
-                                header = response['params'].get('result', {})
-
-                            if 'number' in header:
-                                block_num = header['number']
-                                # Parse hex block number if needed
-                                if isinstance(block_num, str):
-                                    block_num = int(block_num, 16)
-                                await self.on_new_block(block_num)
-                        except Exception as loop_err:
-                            logger.error(f"Block Processing Error: {loop_err}")
+                if current_block > self.last_processed_block:
+                    # New block(s) detected — process the latest one
+                    self.last_processed_block = current_block
+                    await self.process_block(current_block)
+                else:
+                    # No new block yet — wait briefly and re-check
+                    await asyncio.sleep(POLL_INTERVAL)
 
             except Exception as e:
-                logger.error(f"🔌 WSS Connection Lost: {e}")
-                await self.send_telegram_alert(
-                    f"⚠️ <b>WSS Disconnected:</b> <code>{e}</code>",
-                    is_error=True
-                )
-                # Reconnect delay — prevents rapid reconnect spam
-                await asyncio.sleep(5)
+                err_str = str(e).lower()
+                if "429" in err_str or "rate" in err_str:
+                    await self.rpc.handle_rate_limit()
+                    # Re-init contracts after RPC switch
+                    await self.init_contracts()
+                else:
+                    logger.error(f"⚠️ Polling Error: {e}")
+                    await self.send_telegram_alert(
+                        f"⚠️ <b>Polling Error:</b> <code>{e}</code>",
+                        is_error=True
+                    )
+                    await asyncio.sleep(5)
 
 
 if __name__ == "__main__":
-    bot = GravitySniperWSS()
+    bot = GravityBot()
     try:
         asyncio.run(bot.run_forever())
     except KeyboardInterrupt:
