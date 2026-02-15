@@ -137,14 +137,14 @@ class AsyncRPCManager:
         except Exception as e:
             error_str = str(e).lower()
             
-            # Adaptive Backoff
+            # Adaptive Backoff (CRITICAL HOTFIX: 30s Wait)
             if "429" in error_str or "403" in error_str or "too many requests" in error_str:
                 self.consecutive_errors += 1
-                logger.warning(f"⚠️ Rate Limit Hit (Strike {self.consecutive_errors}/3). Cooling down...")
-                await asyncio.sleep(5)
+                logger.warning(f"⚠️ Rate Limit Hit (Strike {self.consecutive_errors}/3). CAUTION: Cooling down for 30s...")
+                await asyncio.sleep(30) # <--- CRITICAL UPDATE: 30s wait
                 
                 if self.active_rpc_index == -1:
-                    self.rpc_delay += 0.05
+                    self.rpc_delay += 0.1
                     logger.info(f"🐌 Increased Primary Delay to {self.rpc_delay:.2f}s")
                 
                 # 3-Strike Rule
@@ -615,7 +615,7 @@ class AdaptiveSniperBot:
                 await self.load_targets_async()
                 if not self.targets:
                     print("💤 No targets. Sleeping...", end="\r")
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(10) # <--- CRITICAL UPDATE/HOTFIX: 10s sleep
                     continue
 
                 print(f"🎯 Tracking {len(self.targets)} targets...", end="\r")
@@ -625,8 +625,8 @@ class AdaptiveSniperBot:
                 await asyncio.gather(*tasks)
                 
                 elapsed = time.time() - start_time
-                if elapsed < 0.5:
-                    await asyncio.sleep(0.5)
+                # CRITICAL HOTFIX: Forced 1.0s delay ALWAYS after loop
+                await asyncio.sleep(1.0)
 
             except Exception as e:
                 await self.log_system(f"💥 Worker loop error: {e}", "error")

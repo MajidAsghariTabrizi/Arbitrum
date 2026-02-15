@@ -87,15 +87,15 @@ class SyncRPCManager:
         except Exception as e:
             error_str = str(e).lower()
             
-            # Adaptive Backoff for Rate Limits
+            # Adaptive Backoff for Rate Limits (CRITICAL HOTFIX: 30s Wait)
             if "429" in error_str or "403" in error_str or "too many requests" in error_str:
                 self.consecutive_errors += 1
-                print(f"⚠️ Rate Limit Hit (Strike {self.consecutive_errors}/3). Cooling down...")
-                time.sleep(5)
+                print(f"⚠️ Rate Limit Hit (Strike {self.consecutive_errors}/3). CAUTION: Cooling down for 30s...")
+                time.sleep(30) # <--- CRITICAL UPDATE: 30s wait on rate limit
                 
                 # Adaptive Penalty
                 if self.active_rpc_index == -1:
-                    self.rpc_delay += 0.05
+                    self.rpc_delay += 0.1 # More aggressive backoff
                     print(f"🐌 Increased Primary Delay to {self.rpc_delay:.2f}s")
                 
                 # 3-Strike Rule
@@ -287,6 +287,9 @@ def scan_debt_tokens():
                 # Show progress on same line
                 print(f"   ⏳ Block: {chunk_start} | Found: {len(all_users)}", end="\r")
                 
+                # CRITICAL HOTFIX: Forced 1.0s delay between every chunk to save quota
+                time.sleep(1.0) 
+                
                 # Retry Logic for Stability handled by rpc_manager.call
                 try:
                     logs = rpc_manager.call(w3.eth.get_logs, {
@@ -313,11 +316,6 @@ def scan_debt_tokens():
                             all_users.add(addr1)
                         if addr2 != "0x0000000000000000000000000000000000000000":
                             all_users.add(addr2)
-                
-                # Minimum throttle per chunk
-                # rpc_manager.call handles delays, but let's be safe.
-                # Actually rpc_manager.call enforces delay at start. 
-                # So we are good.
 
             # 🚀 Progressive Feeding: flush targets to disk after each token scan
             # Cache Retention: only write if we have targets
@@ -347,7 +345,7 @@ def scan_debt_tokens():
     return final_list
 
 if __name__ == "__main__":
-    send_telegram_alert("🟢 <b>Radar Scanner Started:</b> Hunting for whale debts.")
+    send_telegram_alert("🟢 <b>Radar Scanner Started:</b> Hunting for whale debts (5-min intervals).")
     try:
         while True:
             try:
@@ -361,13 +359,13 @@ if __name__ == "__main__":
                 else:
                     print("⚠️ Scan returned 0 targets. Keeping previous targets in cache.")
                 
-                print("⏳ Sleeping for 60 seconds...")
-                time.sleep(60)
+                print("⏳ Sleeping for 300 seconds (5 mins)...")
+                time.sleep(300) # <--- CRITICAL UPDATE: 5 mins sleep
                 
             except Exception as e:
                 print(f"❌ Radar Error: {e}")
                 send_telegram_alert(f"🆘 <b>Radar Crash Alert:</b> <code>{e}</code>", is_error=True)
-                time.sleep(10)
+                time.sleep(60)
     except Exception as e:
         send_telegram_alert(f"🆘 <b>Fatal Scanner Crash:</b> <code>{e}</code>")
         print(f"💥 FATAL: {e}")
