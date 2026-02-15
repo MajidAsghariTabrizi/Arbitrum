@@ -18,6 +18,10 @@ class SyncRPCManager:
         self.active_rpc_index = -1 # -1 = Primary, 0+ = Fallback index
         self.w3 = Web3(Web3.HTTPProvider(self.primary_rpc, request_kwargs={'timeout': 60}))
         
+        # Adaptive Rate Limiting State
+        self.rpc_delay = 0.1
+        self.consecutive_errors = 0
+        
         # Validation
         if not self.primary_rpc:
             print("❌ PRIMARY_RPC not found in .env")
@@ -37,6 +41,8 @@ class SyncRPCManager:
             print("\n🟢 Primary RPC checked OK. Switching back!")
             self.w3 = temp_w3
             self.active_rpc_index = -1
+            self.rpc_delay = 0.1 # Reset delay
+            self.consecutive_errors = 0
             send_telegram_alert("🟢 <b>Primary RPC Restored.</b> Switched back to main node.")
         except Exception:
             pass # Primary still down, stay on fallback
@@ -44,7 +50,7 @@ class SyncRPCManager:
     def handle_failure(self):
         """Switches to next fallback RPC on failure."""
         curr_mode = "Primary" if self.active_rpc_index == -1 else f"Fallback #{self.active_rpc_index + 1}"
-        print(f"⚠️ RPC Failure on {curr_mode}. Switching...")
+        print(f"⚠️ RPC Failure ({self.consecutive_errors} strikes). Switching...")
         
         # Try next fallback
         next_idx = self.active_rpc_index + 1
@@ -52,15 +58,65 @@ class SyncRPCManager:
             new_url = self.fallback_rpcs[next_idx]
             self.active_rpc_index = next_idx
             self.w3 = Web3(Web3.HTTPProvider(new_url, request_kwargs={'timeout': 60}))
+            # Strict Fallback Throttling
+            self.rpc_delay = 0.5 
+            self.consecutive_errors = 0
+            
             msg = f"⚠️ <b>Primary RPC Failed.</b> Switching to Fallback #{next_idx + 1}."
-            print(f"🔄 Switched to Fallback: {new_url}")
+            print(f"🔄 Switched to Fallback: {new_url} (Delay: {self.rpc_delay}s)")
             send_telegram_alert(msg, is_error=True)
             return True
         else:
-            print("❌ All Fallbacks exhausted. Resetting to Primary to retry.")
+            print("❌ All Fallbacks exhausted. Sleeping 30s then Resetting to Primary.")
+            time.sleep(30) # Exhaustion Cooldown
+            
             self.active_rpc_index = -1
             self.w3 = Web3(Web3.HTTPProvider(self.primary_rpc, request_kwargs={'timeout': 60}))
+            self.rpc_delay = 0.1 # Reset delay to try again fresh
+            self.consecutive_errors = 0
             return False
+
+    def call(self, func, *args, **kwargs):
+        """Wrapper for Web3 calls with Adaptive Rate Limiting & 3-Strike Rule."""
+        # Enforce delay. Strict 0.5s if Fallback.
+        delay = 0.5 if self.active_rpc_index >= 0 else self.rpc_delay
+        time.sleep(delay)
+
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            error_str = str(e).lower()
+            
+            # Adaptive Backoff for Rate Limits
+            if "429" in error_str or "403" in error_str or "too many requests" in error_str:
+                self.consecutive_errors += 1
+                print(f"⚠️ Rate Limit Hit (Strike {self.consecutive_errors}/3). Cooling down...")
+                time.sleep(5)
+                
+                # Adaptive Penalty
+                if self.active_rpc_index == -1:
+                    self.rpc_delay += 0.05
+                    print(f"🐌 Increased Primary Delay to {self.rpc_delay:.2f}s")
+                
+                # 3-Strike Rule
+                if self.consecutive_errors >= 3:
+                    if self.handle_failure():
+                        # Retry on new node
+                        return self.call(func, *args, **kwargs)
+                    else:
+                        raise e
+                else:
+                    # Retry same node
+                    return self.call(func, *args, **kwargs)
+            else:
+                # Other errors (Timeout, etc) - count as strike too? Yes.
+                self.consecutive_errors += 1
+                if self.consecutive_errors >= 3:
+                     if self.handle_failure():
+                        return self.call(func, *args, **kwargs)
+                     else:
+                        raise e
+                raise e # Let caller see error if checking specific exception outside
 
 rpc_manager = SyncRPCManager()
 
@@ -95,8 +151,6 @@ UNDERLYING_ASSETS = {
 
 # Transfer Event: Transfer(from, to, value)
 # In debt tokens, this means debt moved (minted/burned)
-# Transfer Event: Transfer(from, to, value)
-# In debt tokens, this means debt moved (minted/burned)
 TRANSFER_TOPIC = Web3.keccak(text="Transfer(address,address,uint256)").hex()
 
 # SETTINGS
@@ -107,7 +161,7 @@ CHUNK_SIZE = 50                # Keep 50 to satisfy Chainstack limits
 LAST_ERRORS = {}
 ALERT_COOLDOWN = 300  # 5 minutes
 
-RPC_WAS_DOWN = False
+RPC_WAS_DOWN = False  # <==== Global State
 
 
 def send_telegram_alert(msg, is_error=False):
@@ -147,7 +201,10 @@ def build_token_map():
         try:
             underlying_cs = Web3.to_checksum_address(underlying)
             # Returns: (aToken, stableDebtToken, variableDebtToken)
-            result = data_provider.functions.getReserveTokensAddresses(underlying_cs).call()
+            # Use call wrapper? No, simple call is OK, or wrap entire loop handling?
+            # Let's wrap the call.
+            result = rpc_manager.call(data_provider.functions.getReserveTokensAddresses(underlying_cs).call)
+            
             var_debt_token = result[2]
             # Skip if returned zero address (asset not active on Aave)
             if var_debt_token == "0x0000000000000000000000000000000000000000":
@@ -186,12 +243,12 @@ def scan_debt_tokens():
 
     # Active RPC test: fetch block_number to get the EXACT error on failure
     try:
-        current_block = w3.eth.block_number
+        current_block = rpc_manager.call(lambda: w3.eth.block_number)
     except Exception as e:
         error_msg = str(e)
         print(f"💥 RPC Connection Failed: {error_msg}")
         
-        # 2. Trigger Failover
+        # 2. Trigger Failover (Already handled by 3-strike rule inside call(), but double check)
         rpc_manager.handle_failure()
         
         if not RPC_WAS_DOWN:
@@ -230,25 +287,17 @@ def scan_debt_tokens():
                 # Show progress on same line
                 print(f"   ⏳ Block: {chunk_start} | Found: {len(all_users)}", end="\r")
                 
-                # Retry Logic for Stability
-                logs = []
-                for attempt in range(3):
-                    try:
-                        logs = w3.eth.get_logs({
-                            'fromBlock': chunk_start,
-                            'toBlock': chunk_end,
-                            'address': address,
-                            'topics': [TRANSFER_TOPIC]
-                        })
-                        break # Success
-                    except Exception as e:
-                        # Failover check inside the chunk loop
-                        rpc_manager.handle_failure()
-                        w3 = rpc_manager.w3 # Update reference
-                        if attempt < 2:
-                            time.sleep(2)
-                        else:
-                            logs = [] # Give up on this chunk
+                # Retry Logic for Stability handled by rpc_manager.call
+                try:
+                    logs = rpc_manager.call(w3.eth.get_logs, {
+                        'fromBlock': chunk_start,
+                        'toBlock': chunk_end,
+                        'address': address,
+                        'topics': [TRANSFER_TOPIC]
+                    })
+                except Exception:
+                    # If failed after retries/failover, skip chunk
+                    logs = [] 
                 
                 for log in logs:
                     if len(log['topics']) >= 3:
@@ -265,7 +314,10 @@ def scan_debt_tokens():
                         if addr2 != "0x0000000000000000000000000000000000000000":
                             all_users.add(addr2)
                 
-                time.sleep(0.05) # Rate limit protection
+                # Minimum throttle per chunk
+                # rpc_manager.call handles delays, but let's be safe.
+                # Actually rpc_manager.call enforces delay at start. 
+                # So we are good.
 
             # 🚀 Progressive Feeding: flush targets to disk after each token scan
             # Cache Retention: only write if we have targets
