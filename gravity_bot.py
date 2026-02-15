@@ -614,7 +614,7 @@ class AdaptiveSniperBot:
                 # Reload targets
                 await self.load_targets_async()
                 if not self.targets:
-                    print("💤 No targets. Sleeping...", end="\r")
+                    print("💤 No targets. Sleeping 10s...")
                     await asyncio.sleep(10) # <--- CRITICAL UPDATE/HOTFIX: 10s sleep
                     continue
 

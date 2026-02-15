@@ -293,9 +293,9 @@ def scan_debt_tokens():
                 # Retry Logic for Stability handled by rpc_manager.call
                 try:
                     logs = rpc_manager.call(w3.eth.get_logs, {
-                        'fromBlock': int(chunk_start),
-                        'toBlock': int(chunk_end),
-                        'address': Web3.to_checksum_address(address),
+                        'fromBlock': int(chunk_start),               # <--- FIXED: Strict int casting
+                        'toBlock': int(chunk_end),                   # <--- FIXED: Strict int casting
+                        'address': Web3.to_checksum_address(address), # <--- FIXED: Checksum address
                         'topics': [TRANSFER_TOPIC]
                     })
                 except Exception as e:
