@@ -293,13 +293,14 @@ def scan_debt_tokens():
                 # Retry Logic for Stability handled by rpc_manager.call
                 try:
                     logs = rpc_manager.call(w3.eth.get_logs, {
-                        'fromBlock': chunk_start,
-                        'toBlock': chunk_end,
-                        'address': address,
+                        'fromBlock': int(chunk_start),
+                        'toBlock': int(chunk_end),
+                        'address': Web3.to_checksum_address(address),
                         'topics': [TRANSFER_TOPIC]
                     })
-                except Exception:
+                except Exception as e:
                     # If failed after retries/failover, skip chunk
+                    print(f"   ⚠️ Chunk Skipped: {e}")
                     logs = [] 
                 
                 for log in logs:
