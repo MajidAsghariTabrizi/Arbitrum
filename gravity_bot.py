@@ -184,6 +184,7 @@ class AdaptiveSniperBot:
         self.asset_decimals = {} # Cache for decimals
         self.prices = {} # Cache for prices
         self.running = True
+        self._last_errors = {}  # Anti-spam cooldown for Telegram error alerts
         self.retry_regex = re.compile(r"try_again_in['\"]?:\s*['\"]?([\d\.]+)ms")
 
     async def log_system(self, msg, level="info"):
@@ -206,10 +207,19 @@ class AdaptiveSniperBot:
             await loop.run_in_executor(None, lambda: requests.post(DISCORD_WEBHOOK, json=payload))
         except Exception: pass
 
-    async def send_telegram_alert(self, msg):
-        """Sends an HTML-formatted Telegram alert via Bot API (non-blocking)."""
+    async def send_telegram_alert(self, msg, is_error=False):
+        """Sends an HTML-formatted Telegram alert with anti-spam cooldown for errors."""
         if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
             return
+
+        # Anti-spam: skip duplicate error alerts within cooldown period
+        if is_error:
+            error_key = msg[:100]
+            now = time.time()
+            if error_key in self._last_errors and (now - self._last_errors[error_key]) < 300:
+                return  # Suppress duplicate
+            self._last_errors[error_key] = now
+
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             payload = {
@@ -357,6 +367,16 @@ class AdaptiveSniperBot:
         return best_debt, best_collateral, debt_amount_raw, max_debt_value
 
     async def execute_liquidation(self, user):
+        try:
+            await self._execute_liquidation_inner(user)
+        except Exception as e:
+            await self.log_system(f"Liquidation Task Error for {user}: {e}", "error")
+            await self.send_telegram_alert(
+                f"⚠️ <b>Liquidation Task Error</b> for <code>{user}</code>:\n<code>{e}</code>",
+                is_error=True
+            )
+
+    async def _execute_liquidation_inner(self, user):
         await self.log_system(f"🚨 PROCESSING LIQUIDATION: {user}", "warning")
         
         # 1. Analyze Assets
@@ -559,39 +579,47 @@ class AdaptiveSniperBot:
         last_target_refresh = 0
         
         while self.running:
-            start_time = time.time()
-            
-            if start_time - last_target_refresh > 5:
-                await self.load_targets_async()
-                last_target_refresh = start_time
-                print(f"🎯 Tracking {len(self.targets)} targets...", end="\r")
+            try:
+                start_time = time.time()
+                
+                if start_time - last_target_refresh > 5:
+                    await self.load_targets_async()
+                    last_target_refresh = start_time
+                    print(f"🎯 Tracking {len(self.targets)} targets...", end="\r")
 
-            if not self.targets:
-                await asyncio.sleep(1)
-                continue
+                if not self.targets:
+                    await asyncio.sleep(1)
+                    continue
 
-            tasks = [self.check_user_health(user) for user in self.targets]
-            results = await asyncio.gather(*tasks)
+                tasks = [self.check_user_health(user) for user in self.targets]
+                results = await asyncio.gather(*tasks)
 
-            # 🚀 Concurrent Execution: fire all liquidations simultaneously
-            liquidation_tasks = []
-            for user, hf in results:
-                # ⚠️ PRODUCTION: threshold is `hf < 1.0` for real liquidations.
-                if hf and hf < 1.0:
-                    await self.log_system(f"🎯 LIQUIDATABLE: {user} | HF: {hf:.4f}", "info")
-                    liquidation_tasks.append(self.execute_liquidation(user))
-                elif hf and hf < 1.02:
-                    # Pre-load data for risky users?
-                    pass
+                # 🚀 Concurrent Execution: fire all liquidations simultaneously
+                liquidation_tasks = []
+                for user, hf in results:
+                    # ⚠️ PRODUCTION: threshold is `hf < 1.0` for real liquidations.
+                    if hf and hf < 1.0:
+                        await self.log_system(f"🎯 LIQUIDATABLE: {user} | HF: {hf:.4f}", "info")
+                        liquidation_tasks.append(self.execute_liquidation(user))
+                    elif hf and hf < 1.02:
+                        # Pre-load data for risky users?
+                        pass
 
-            if liquidation_tasks:
-                await self.log_system(f"⚡ Firing {len(liquidation_tasks)} concurrent liquidation(s)...", "warning")
-                await asyncio.gather(*liquidation_tasks, return_exceptions=True)
+                if liquidation_tasks:
+                    await self.log_system(f"⚡ Firing {len(liquidation_tasks)} concurrent liquidation(s)...", "warning")
+                    await asyncio.gather(*liquidation_tasks, return_exceptions=True)
 
+                elapsed = time.time() - start_time
+                if elapsed < 0.5:
+                    await asyncio.sleep(0.5)
 
-            elapsed = time.time() - start_time
-            if elapsed < 0.5:
-                await asyncio.sleep(0.5)
+            except Exception as e:
+                await self.log_system(f"💥 Worker loop error: {e}", "error")
+                await self.send_telegram_alert(
+                    f"⚠️ <b>Worker Loop Error:</b>\n<code>{e}</code>",
+                    is_error=True
+                )
+                await asyncio.sleep(5)
 
     async def _run_with_alerts(self):
         """Wraps worker_loop with Telegram startup & crash alerts."""

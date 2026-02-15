@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import requests
 from web3 import Web3
 from dotenv import load_dotenv
 
@@ -51,6 +52,36 @@ TRANSFER_TOPIC = w3.keccak(text="Transfer(address,address,uint256)").hex()
 TOTAL_BLOCKS_TO_SCAN = 50000   # Check last ~4 hours
 CHUNK_SIZE = 50                # Keep 50 to satisfy Chainstack limits
 
+# Anti-spam cooldown for error alerts
+LAST_ERRORS = {}
+ALERT_COOLDOWN = 300  # 5 minutes
+
+
+def send_telegram_alert(msg, is_error=False):
+    """Sends an HTML-formatted Telegram alert with anti-spam cooldown for errors."""
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    if not bot_token or not chat_id:
+        return
+
+    # Anti-spam: skip duplicate error alerts within cooldown period
+    if is_error:
+        error_key = msg[:100]  # Use truncated message as key
+        now = time.time()
+        if error_key in LAST_ERRORS and (now - LAST_ERRORS[error_key]) < ALERT_COOLDOWN:
+            return  # Suppress duplicate
+        LAST_ERRORS[error_key] = now
+
+    try:
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        requests.post(url, json={
+            "chat_id": chat_id,
+            "text": msg,
+            "parse_mode": "HTML"
+        }, timeout=10)
+    except Exception:
+        pass
+
 
 def build_token_map():
     """Dynamically fetches Variable Debt Token addresses from Aave V3 PoolDataProvider."""
@@ -94,9 +125,23 @@ def save_targets_atomic(targets_list):
 
 
 def scan_debt_tokens():
-    if not w3.is_connected():
-        print("💥 Failed to connect to RPC Node.")
+    global RPC_WAS_DOWN
+
+    # Active RPC test: fetch block_number to get the EXACT error on failure
+    try:
+        current_block = w3.eth.block_number
+    except Exception as e:
+        error_msg = str(e)
+        print(f"💥 RPC Connection Failed: {error_msg}")
+        if not RPC_WAS_DOWN:
+            send_telegram_alert(f"⚠️ <b>Scanner RPC Down:</b>\n<code>{error_msg}</code>", is_error=True)
+            RPC_WAS_DOWN = True
         return []
+
+    # RPC recovered — send recovery alert if it was previously down
+    if RPC_WAS_DOWN:
+        send_telegram_alert("🟢 <b>Scanner RPC Restored:</b> Connection re-established.")
+        RPC_WAS_DOWN = False
 
     # Dynamically build the debt token map from on-chain data
     print("📡 Fetching Variable Debt Token addresses from PoolDataProvider...")
@@ -106,7 +151,6 @@ def scan_debt_tokens():
         return []
     print(f"🎯 Loaded {len(token_map)} debt tokens.\n")
 
-    current_block = w3.eth.block_number
     start_block = current_block - TOTAL_BLOCKS_TO_SCAN
     all_users = set()
 
@@ -116,53 +160,59 @@ def scan_debt_tokens():
 
     # Scan each token (Progressive Feeding: save after each token)
     for name, address in token_map.items():
-        print(f"\n🔍 Scanning {name} [{address}]...")
-        
-        for chunk_start in range(start_block, current_block, CHUNK_SIZE):
-            chunk_end = min(chunk_start + CHUNK_SIZE, current_block)
+        try:
+            print(f"\n🔍 Scanning {name} [{address}]...")
             
-            # Show progress on same line
-            print(f"   ⏳ Block: {chunk_start} | Found: {len(all_users)}", end="\r")
-            
-            # Retry Logic for Stability
-            logs = []
-            for attempt in range(3):
-                try:
-                    logs = w3.eth.get_logs({
-                        'fromBlock': chunk_start,
-                        'toBlock': chunk_end,
-                        'address': address,
-                        'topics': [TRANSFER_TOPIC]
-                    })
-                    break # Success
-                except Exception as e:
-                    if attempt < 2:
-                        time.sleep(2)
-                    else:
-                        logs = [] # Give up on this chunk
-            
-            for log in logs:
-                if len(log['topics']) >= 3:
-                    # Topic 1 is 'from', Topic 2 is 'to'
-                    # In Debt tokens: 
-                    # - mint (borrow): from=0x0, to=User
-                    # - burn (repay): from=User, to=0x0
-                    addr1 = w3.to_checksum_address("0x" + log['topics'][1].hex()[-40:])
-                    addr2 = w3.to_checksum_address("0x" + log['topics'][2].hex()[-40:])
-                    
-                    # Filter out the zero address (mint/burn origin)
-                    if addr1 != "0x0000000000000000000000000000000000000000":
-                        all_users.add(addr1)
-                    if addr2 != "0x0000000000000000000000000000000000000000":
-                        all_users.add(addr2)
-            
-            time.sleep(0.05) # Rate limit protection
+            for chunk_start in range(start_block, current_block, CHUNK_SIZE):
+                chunk_end = min(chunk_start + CHUNK_SIZE, current_block)
+                
+                # Show progress on same line
+                print(f"   ⏳ Block: {chunk_start} | Found: {len(all_users)}", end="\r")
+                
+                # Retry Logic for Stability
+                logs = []
+                for attempt in range(3):
+                    try:
+                        logs = w3.eth.get_logs({
+                            'fromBlock': chunk_start,
+                            'toBlock': chunk_end,
+                            'address': address,
+                            'topics': [TRANSFER_TOPIC]
+                        })
+                        break # Success
+                    except Exception as e:
+                        if attempt < 2:
+                            time.sleep(2)
+                        else:
+                            logs = [] # Give up on this chunk
+                
+                for log in logs:
+                    if len(log['topics']) >= 3:
+                        # Topic 1 is 'from', Topic 2 is 'to'
+                        # In Debt tokens: 
+                        # - mint (borrow): from=0x0, to=User
+                        # - burn (repay): from=User, to=0x0
+                        addr1 = w3.to_checksum_address("0x" + log['topics'][1].hex()[-40:])
+                        addr2 = w3.to_checksum_address("0x" + log['topics'][2].hex()[-40:])
+                        
+                        # Filter out the zero address (mint/burn origin)
+                        if addr1 != "0x0000000000000000000000000000000000000000":
+                            all_users.add(addr1)
+                        if addr2 != "0x0000000000000000000000000000000000000000":
+                            all_users.add(addr2)
+                
+                time.sleep(0.05) # Rate limit protection
 
-        # 🚀 Progressive Feeding: flush targets to disk after each token scan
-        # Cache Retention: only write if we have targets
-        if len(all_users) > 0:
-            save_targets_atomic(list(all_users))
-            print(f"\n   💾 Progressive save: {len(all_users)} targets flushed to disk.")
+            # 🚀 Progressive Feeding: flush targets to disk after each token scan
+            # Cache Retention: only write if we have targets
+            if len(all_users) > 0:
+                save_targets_atomic(list(all_users))
+                print(f"\n   💾 Progressive save: {len(all_users)} targets flushed to disk.")
+
+        except Exception as e:
+            print(f"\n   ❌ Error scanning {name}: {e}")
+            send_telegram_alert(f"⚠️ <b>Scanner Error</b> on <code>{name}</code>:\n<code>{e}</code>", is_error=True)
+            continue
 
     final_list = list(all_users)
     
@@ -181,21 +231,28 @@ def scan_debt_tokens():
     return final_list
 
 if __name__ == "__main__":
-    while True:
-        try:
-            print("\n🔍 Starting new radar scan...")
-            targets = scan_debt_tokens()
-            
-            # Final atomic save (Cache Retention: only if we have targets)
-            if len(targets) > 0:
-                save_targets_atomic(targets)
-                print(f"💾 Final save: {len(targets)} targets to '{get_target_path()}'")
-            else:
-                print("⚠️ Scan returned 0 targets. Keeping previous targets in cache.")
-            
-            print("⏳ Sleeping for 60 seconds...")
-            time.sleep(60)
-            
-        except Exception as e:
-            print(f"❌ Radar Error: {e}")
-            time.sleep(10)
+    send_telegram_alert("🟢 <b>Radar Scanner Started:</b> Hunting for whale debts.")
+    try:
+        while True:
+            try:
+                print("\n🔍 Starting new radar scan...")
+                targets = scan_debt_tokens()
+                
+                # Final atomic save (Cache Retention: only if we have targets)
+                if len(targets) > 0:
+                    save_targets_atomic(targets)
+                    print(f"💾 Final save: {len(targets)} targets to '{get_target_path()}'")
+                else:
+                    print("⚠️ Scan returned 0 targets. Keeping previous targets in cache.")
+                
+                print("⏳ Sleeping for 60 seconds...")
+                time.sleep(60)
+                
+            except Exception as e:
+                print(f"❌ Radar Error: {e}")
+                send_telegram_alert(f"🆘 <b>Radar Crash Alert:</b> <code>{e}</code>", is_error=True)
+                time.sleep(10)
+    except Exception as e:
+        send_telegram_alert(f"🆘 <b>Fatal Scanner Crash:</b> <code>{e}</code>")
+        print(f"💥 FATAL: {e}")
+        time.sleep(60)
