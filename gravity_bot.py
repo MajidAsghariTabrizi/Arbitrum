@@ -8,7 +8,7 @@ import warnings
 from decimal import Decimal
 import aiofiles
 import requests
-from web3 import AsyncWeb3
+from web3 import AsyncWeb3, WebSocketProvider
 from dotenv import load_dotenv
 
 # Suppress ResourceWarning for cleaner logs
@@ -176,7 +176,7 @@ class GravitySniperWSS:
             self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(WSS_URL))
         else:
             # Standard AsyncWebsocketProvider
-            self.w3 = AsyncWeb3(AsyncWeb3.AsyncWebsocketProvider(WSS_URL))
+            self.w3 = AsyncWeb3(WebSocketProvider(WSS_URL))
             
         if not await self.w3.is_connected():
             raise ConnectionError("❌ Failed to connect to WSS/RPC")
