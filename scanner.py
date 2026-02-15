@@ -107,6 +107,8 @@ CHUNK_SIZE = 50                # Keep 50 to satisfy Chainstack limits
 LAST_ERRORS = {}
 ALERT_COOLDOWN = 300  # 5 minutes
 
+RPC_WAS_DOWN = False
+
 
 def send_telegram_alert(msg, is_error=False):
     """Sends an HTML-formatted Telegram alert with anti-spam cooldown for errors."""
