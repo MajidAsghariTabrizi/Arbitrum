@@ -43,6 +43,75 @@ if not RPC_URL or not PRIVATE_KEY:
     exit(1)
 
 
+# --- 2. ASYNC RPC MANAGER ---
+class AsyncRPCManager:
+    def __init__(self, bot_instance):
+        self.bot = bot_instance
+        self.primary_rpc = os.getenv("PRIMARY_RPC")
+        self.fallback_rpcs = os.getenv("FALLBACK_RPCS", "").split(",")
+        self.fallback_rpcs = [url.strip() for url in self.fallback_rpcs if url.strip()]
+        
+        # Validation
+        if not self.primary_rpc:
+            logger.error("❌ PRIMARY_RPC not found in .env")
+            exit(1)
+
+        self.active_rpc_index = -1 # -1 = Primary
+        self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(self.primary_rpc, request_kwargs={'timeout': 60}))
+        self.prober_running = False
+
+    async def start_background_prober(self):
+        """Background task: Pings Primary RPC every 30s if we are on Fallback."""
+        if self.prober_running: return
+        self.prober_running = True
+        logger.info("🕵️ RPC Prober Task Started")
+        
+        while True:
+            await asyncio.sleep(30)
+            if self.active_rpc_index != -1: # Only probe if on fallback
+                try:
+                    # Probe Primary
+                    temp_w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(self.primary_rpc, request_kwargs={'timeout': 10}))
+                    await temp_w3.eth.block_number
+                    
+                    # Success! Revert
+                    logger.info("🟢 Primary RPC Alive! Switching back...")
+                    self.active_rpc_index = -1
+                    self.w3 = temp_w3
+                    
+                    # Re-init contracts linked to new w3
+                    await self.bot.reinit_contracts()
+                    
+                    await self.bot.send_telegram_alert("🟢 <b>Primary RPC Restored.</b> Bot switched back to main node.")
+                except Exception:
+                    pass # Still down
+
+    async def handle_failure(self):
+        """Switches to next fallback on failure."""
+        # Try next fallback
+        next_idx = self.active_rpc_index + 1
+        if next_idx < len(self.fallback_rpcs):
+            new_url = self.fallback_rpcs[next_idx]
+            self.active_rpc_index = next_idx
+            self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(new_url, request_kwargs={'timeout': 60}))
+            
+            logger.warning(f"⚠️ RPC Failure. Switching to Fallback #{next_idx + 1}: {new_url}")
+            await self.bot.reinit_contracts()
+            
+            await self.bot.send_telegram_alert(
+                f"⚠️ <b>Primary RPC Failed.</b> Switching to Fallback #{next_idx + 1}.",
+                is_error=True
+            )
+            return True
+        else:
+            # Exhausted all? Reset to Primary to retry
+            logger.error("❌ All RPCs exhausted. Resetting to Primary.")
+            self.active_rpc_index = -1
+            self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(self.primary_rpc, request_kwargs={'timeout': 60}))
+            await self.bot.reinit_contracts()
+            return False
+
+
 # Arbitrum One Addresses (EIP-55 Checksummed)
 POOL_ADDRESS = AsyncWeb3.to_checksum_address("0x794a61358D6845594F94dc1DB02A252b5b4814aD")
 POOL_ADDRESSES_PROVIDER = AsyncWeb3.to_checksum_address("0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb")
@@ -164,20 +233,20 @@ ERC20_ABI = [{
 
 class AdaptiveSniperBot:
     def __init__(self):
-        self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(RPC_URL))
-        self.account = self.w3.eth.account.from_key(PRIVATE_KEY)
+        # Init RPC Manager
+        self.rpc_manager = AsyncRPCManager(self)
         
-        # Contracts
-        self.pool = self.w3.eth.contract(address=POOL_ADDRESS, abi=POOL_ABI)
-        self.data_provider = self.w3.eth.contract(address=DATA_PROVIDER_ADDRESS, abi=DATA_PROVIDER_ABI)
-        self.addresses_provider = self.w3.eth.contract(address=POOL_ADDRESSES_PROVIDER, abi=ADDRESSES_PROVIDER_ABI)
-        self.quoter = self.w3.eth.contract(address=QUOTER_V2_ADDRESS, abi=QUOTER_ABI)
+        # Account
+        self.account = self.rpc_manager.w3.eth.account.from_key(PRIVATE_KEY)
+        logger.info(f"🔑 Loaded Liquidator: {self.account.address}")
         
-        self.liquidator_contract = None # Init later
-        if LIQUIDATOR_ADDRESS:
-             self.liquidator_contract = self.w3.eth.contract(address=LIQUIDATOR_ADDRESS, abi=LIQUIDATOR_ABI)
-
-        self.oracle_contract = None # Init dynamically
+        # Contracts (Initialized in init_infrastructure via reinit_contracts)
+        self.pool = None
+        self.data_provider = None
+        self.addresses_provider = None
+        self.quoter = None
+        self.liquidator_contract = None
+        self.oracle_contract = None
         
         self.targets = []
         self.reserves_list = []
@@ -232,12 +301,31 @@ class AdaptiveSniperBot:
         except Exception as e:
             logger.warning(f"Telegram alert failed: {e}")
 
+    async def reinit_contracts(self):
+        """Called by RPC Manager when w3 instance changes."""
+        w3 = self.rpc_manager.w3
+        self.pool = w3.eth.contract(address=POOL_ADDRESS, abi=POOL_ABI)
+        self.data_provider = w3.eth.contract(address=DATA_PROVIDER_ADDRESS, abi=DATA_PROVIDER_ABI)
+        self.addresses_provider = w3.eth.contract(address=POOL_ADDRESSES_PROVIDER, abi=ADDRESSES_PROVIDER_ABI)
+        self.quoter = w3.eth.contract(address=QUOTER_V2_ADDRESS, abi=QUOTER_ABI)
+        
+        if LIQUIDATOR_ADDRESS:
+             self.liquidator_contract = w3.eth.contract(address=LIQUIDATOR_ADDRESS, abi=LIQUIDATOR_ABI)
+        
+        # Oracle needs re-fetch? Ideally yes, but address is constant usually.
+        # We'll just re-bind the existing oracle address to new w3
+        if self.oracle_contract:
+            self.oracle_contract = w3.eth.contract(address=self.oracle_contract.address, abi=ORACLE_ABI)
+
     async def init_infrastructure(self):
         """Initializes Oracle and Reserve caches."""
         try:
+            # Ensure contracts are loaded
+            await self.reinit_contracts()
+
             # 1. Get Oracle Address
             oracle_address = await self.addresses_provider.functions.getPriceOracle().call()
-            self.oracle_contract = self.w3.eth.contract(address=oracle_address, abi=ORACLE_ABI)
+            self.oracle_contract = self.rpc_manager.w3.eth.contract(address=oracle_address, abi=ORACLE_ABI)
             
             # 2. Get Reserves List
             self.reserves_list = await self.pool.functions.getReservesList().call()
@@ -371,6 +459,7 @@ class AdaptiveSniperBot:
             await self._execute_liquidation_inner(user)
         except Exception as e:
             await self.log_system(f"Liquidation Task Error for {user}: {e}", "error")
+            await self.rpc_manager.handle_failure() # Attempt failover on error
             await self.send_telegram_alert(
                 f"⚠️ <b>Liquidation Task Error</b> for <code>{user}</code>:\n<code>{e}</code>",
                 is_error=True
@@ -512,7 +601,7 @@ class AdaptiveSniperBot:
             
             tx = await tx_func.build_transaction({
                 'from': self.account.address,
-                'nonce': await self.w3.eth.get_transaction_count(self.account.address),
+                'nonce': await self.rpc_manager.w3.eth.get_transaction_count(self.account.address),
                 'maxFeePerGas': max_fee,
                 'maxPriorityFeePerGas': priority_fee,
                 'gas': int(gas_est * 1.2), # Buffer
@@ -522,12 +611,13 @@ class AdaptiveSniperBot:
             signed_tx = self.w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
             
             # SEND !
-            tx_hash = await self.w3.eth.send_raw_transaction(signed_tx.rawTransaction)
+            # Use current w3 from manager
+            tx_hash = await self.rpc_manager.w3.eth.send_raw_transaction(signed_tx.rawTransaction)
             await self.log_system(f"🔥 TX SENT: {tx_hash.hex()}", "success")
             
             # Monitor TX receipt
             try:
-                receipt = await self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=30)
+                receipt = await self.rpc_manager.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=30)
                 gas_used = receipt['gasUsed']
                 effective_gas_price = receipt['effectiveGasPrice']
                 gas_cost_eth = Decimal(gas_used * effective_gas_price) / Decimal(10**18)
@@ -615,6 +705,7 @@ class AdaptiveSniperBot:
 
             except Exception as e:
                 await self.log_system(f"💥 Worker loop error: {e}", "error")
+                await self.rpc_manager.handle_failure() # Trigger Failover
                 await self.send_telegram_alert(
                     f"⚠️ <b>Worker Loop Error:</b>\n<code>{e}</code>",
                     is_error=True
@@ -623,10 +714,17 @@ class AdaptiveSniperBot:
 
     async def _run_with_alerts(self):
         """Wraps worker_loop with Telegram startup & crash alerts."""
+        # Start Background Prober
+        asyncio.create_task(self.rpc_manager.start_background_prober())
+        
         await self.send_telegram_alert("🟢 <b>Bot Started:</b> Scanning the market.")
         try:
             await self.worker_loop()
         except Exception as e:
+            # Global crash handler
+            # Try to failover once before dying?
+            await self.rpc_manager.handle_failure()
+            
             crash_msg = f"🆘 <b>CRASH ALERT:</b> <code>{e}</code>"
             await self.send_telegram_alert(crash_msg)
             await self.log_system(f"💥 FATAL CRASH: {e}", "error")

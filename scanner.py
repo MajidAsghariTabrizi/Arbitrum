@@ -8,12 +8,61 @@ from dotenv import load_dotenv
 # Load Env
 load_dotenv()
 
-RPC_URL = os.getenv("RPC_URL")
-if not RPC_URL:
-    print("❌ RPC_URL not found in .env")
-    exit()
+# --- RPC MANAGER ---
+class SyncRPCManager:
+    def __init__(self):
+        self.primary_rpc = os.getenv("PRIMARY_RPC")
+        self.fallback_rpcs = os.getenv("FALLBACK_RPCS", "").split(",")
+        self.fallback_rpcs = [url.strip() for url in self.fallback_rpcs if url.strip()]
+        
+        self.active_rpc_index = -1 # -1 = Primary, 0+ = Fallback index
+        self.w3 = Web3(Web3.HTTPProvider(self.primary_rpc, request_kwargs={'timeout': 60}))
+        
+        # Validation
+        if not self.primary_rpc:
+            print("❌ PRIMARY_RPC not found in .env")
+            exit()
 
-w3 = Web3(Web3.HTTPProvider(RPC_URL, request_kwargs={'timeout': 60}))
+    def check_primary_health(self):
+        """Probes Primary RPC if we are currently on a Fallback."""
+        if self.active_rpc_index == -1:
+            return # Already on primary
+
+        try:
+            # Probe Primary
+            temp_w3 = Web3(Web3.HTTPProvider(self.primary_rpc, request_kwargs={'timeout': 10}))
+            temp_w3.eth.block_number
+            
+            # If success, switch back
+            print("\n🟢 Primary RPC checked OK. Switching back!")
+            self.w3 = temp_w3
+            self.active_rpc_index = -1
+            send_telegram_alert("🟢 <b>Primary RPC Restored.</b> Switched back to main node.")
+        except Exception:
+            pass # Primary still down, stay on fallback
+
+    def handle_failure(self):
+        """Switches to next fallback RPC on failure."""
+        curr_mode = "Primary" if self.active_rpc_index == -1 else f"Fallback #{self.active_rpc_index + 1}"
+        print(f"⚠️ RPC Failure on {curr_mode}. Switching...")
+        
+        # Try next fallback
+        next_idx = self.active_rpc_index + 1
+        if next_idx < len(self.fallback_rpcs):
+            new_url = self.fallback_rpcs[next_idx]
+            self.active_rpc_index = next_idx
+            self.w3 = Web3(Web3.HTTPProvider(new_url, request_kwargs={'timeout': 60}))
+            msg = f"⚠️ <b>Primary RPC Failed.</b> Switching to Fallback #{next_idx + 1}."
+            print(f"🔄 Switched to Fallback: {new_url}")
+            send_telegram_alert(msg, is_error=True)
+            return True
+        else:
+            print("❌ All Fallbacks exhausted. Resetting to Primary to retry.")
+            self.active_rpc_index = -1
+            self.w3 = Web3(Web3.HTTPProvider(self.primary_rpc, request_kwargs={'timeout': 60}))
+            return False
+
+rpc_manager = SyncRPCManager()
 
 # --- CONFIGURATION ---
 
@@ -46,7 +95,9 @@ UNDERLYING_ASSETS = {
 
 # Transfer Event: Transfer(from, to, value)
 # In debt tokens, this means debt moved (minted/burned)
-TRANSFER_TOPIC = w3.keccak(text="Transfer(address,address,uint256)").hex()
+# Transfer Event: Transfer(from, to, value)
+# In debt tokens, this means debt moved (minted/burned)
+TRANSFER_TOPIC = Web3.keccak(text="Transfer(address,address,uint256)").hex()
 
 # SETTINGS
 TOTAL_BLOCKS_TO_SCAN = 50000   # Check last ~4 hours
@@ -85,7 +136,7 @@ def send_telegram_alert(msg, is_error=False):
 
 def build_token_map():
     """Dynamically fetches Variable Debt Token addresses from Aave V3 PoolDataProvider."""
-    data_provider = w3.eth.contract(
+    data_provider = rpc_manager.w3.eth.contract(
         address=DATA_PROVIDER_ADDRESS,
         abi=DATA_PROVIDER_ABI
     )
@@ -127,12 +178,20 @@ def save_targets_atomic(targets_list):
 def scan_debt_tokens():
     global RPC_WAS_DOWN
 
+    # 1. Proactive Health Check (Auto-Recovery)
+    rpc_manager.check_primary_health()
+    w3 = rpc_manager.w3 # Get current active instance
+
     # Active RPC test: fetch block_number to get the EXACT error on failure
     try:
         current_block = w3.eth.block_number
     except Exception as e:
         error_msg = str(e)
         print(f"💥 RPC Connection Failed: {error_msg}")
+        
+        # 2. Trigger Failover
+        rpc_manager.handle_failure()
+        
         if not RPC_WAS_DOWN:
             send_telegram_alert(f"⚠️ <b>Scanner RPC Down:</b>\n<code>{error_msg}</code>", is_error=True)
             RPC_WAS_DOWN = True
@@ -140,7 +199,7 @@ def scan_debt_tokens():
 
     # RPC recovered — send recovery alert if it was previously down
     if RPC_WAS_DOWN:
-        send_telegram_alert("🟢 <b>Scanner RPC Restored:</b> Connection re-established.")
+        send_telegram_alert(f"🟢 <b>Scanner RPC Restored:</b> Connected (Block {current_block}).")
         RPC_WAS_DOWN = False
 
     # Dynamically build the debt token map from on-chain data
@@ -181,6 +240,9 @@ def scan_debt_tokens():
                         })
                         break # Success
                     except Exception as e:
+                        # Failover check inside the chunk loop
+                        rpc_manager.handle_failure()
+                        w3 = rpc_manager.w3 # Update reference
                         if attempt < 2:
                             time.sleep(2)
                         else:
@@ -192,8 +254,8 @@ def scan_debt_tokens():
                         # In Debt tokens: 
                         # - mint (borrow): from=0x0, to=User
                         # - burn (repay): from=User, to=0x0
-                        addr1 = w3.to_checksum_address("0x" + log['topics'][1].hex()[-40:])
-                        addr2 = w3.to_checksum_address("0x" + log['topics'][2].hex()[-40:])
+                        addr1 = Web3.to_checksum_address("0x" + log['topics'][1].hex()[-40:])
+                        addr2 = Web3.to_checksum_address("0x" + log['topics'][2].hex()[-40:])
                         
                         # Filter out the zero address (mint/burn origin)
                         if addr1 != "0x0000000000000000000000000000000000000000":
