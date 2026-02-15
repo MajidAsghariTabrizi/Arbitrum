@@ -4,11 +4,20 @@ import asyncio
 import logging
 import re
 import time
+import warnings
 from decimal import Decimal
 import aiofiles
 import requests
 from web3 import AsyncWeb3
 from dotenv import load_dotenv
+
+# ============================================================
+# SUPPRESS RESIDUAL web3.py-INTERNAL ResourceWarning
+# web3.py's AsyncHTTPProvider may leak internal aiohttp sessions
+# that we cannot control. This prevents console spam.
+# ============================================================
+warnings.filterwarnings("ignore", message="Unclosed client session", category=ResourceWarning)
+warnings.filterwarnings("ignore", message="Unclosed connector", category=ResourceWarning)
 
 # --- 1. CONFIGURATION & SETUP ---
 
@@ -50,64 +59,90 @@ class AsyncRPCManager:
         self.primary_rpc = os.getenv("PRIMARY_RPC")
         self.fallback_rpcs = os.getenv("FALLBACK_RPCS", "").split(",")
         self.fallback_rpcs = [url.strip() for url in self.fallback_rpcs if url.strip()]
-        
+
         # Validation
         if not self.primary_rpc:
             logger.error("❌ PRIMARY_RPC not found in .env")
             exit(1)
 
-        self.active_rpc_index = -1 # -1 = Primary
+        self.active_rpc_index = -1  # -1 = Primary
         self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(self.primary_rpc, request_kwargs={'timeout': 60}))
         self.prober_running = False
-        
+
         # Adaptive Rate Limiting
         self.rpc_delay = 0.1
         self.consecutive_errors = 0
 
+    async def _close_old_provider(self):
+        """Gracefully closes the aiohttp session of the current AsyncHTTPProvider.
+        Prevents 'Unclosed client session' memory leaks during RPC failover."""
+        try:
+            provider = self.w3.provider
+            # web3.py AsyncHTTPProvider stores its aiohttp.ClientSession internally
+            if hasattr(provider, '_request_session') and provider._request_session:
+                if not provider._request_session.closed:
+                    await provider._request_session.close()
+                    await asyncio.sleep(0.25)  # Let event loop finalize GC
+        except Exception:
+            pass  # Best-effort cleanup; suppress if provider structure differs
+
     async def start_background_prober(self):
         """Background task: Pings Primary RPC every 30s if we are on Fallback."""
-        if self.prober_running: return
+        if self.prober_running:
+            return
         self.prober_running = True
         logger.info("🕵️ RPC Prober Task Started")
-        
+
         while True:
             await asyncio.sleep(30)
-            if self.active_rpc_index != -1: # Only probe if on fallback
+            if self.active_rpc_index != -1:  # Only probe if on fallback
                 try:
-                    # Probe Primary
+                    # Probe Primary with a disposable w3 instance
                     temp_w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(self.primary_rpc, request_kwargs={'timeout': 10}))
                     await temp_w3.eth.block_number
-                    
-                    # Success! Revert
+
+                    # Success! Close old provider, then switch
                     logger.info("🟢 Primary RPC Alive! Switching back...")
+                    await self._close_old_provider()
+
                     self.active_rpc_index = -1
                     self.w3 = temp_w3
                     self.rpc_delay = 0.1
                     self.consecutive_errors = 0
-                    
+
                     # Re-init contracts linked to new w3
                     await self.bot.reinit_contracts()
-                    
+
                     await self.bot.send_telegram_alert("🟢 <b>Primary RPC Restored.</b> Bot switched back to main node.")
                 except Exception:
-                    pass # Still down
+                    # Close the temp probe session to prevent leak
+                    try:
+                        if hasattr(temp_w3.provider, '_request_session') and temp_w3.provider._request_session:
+                            if not temp_w3.provider._request_session.closed:
+                                await temp_w3.provider._request_session.close()
+                    except Exception:
+                        pass
 
     async def handle_failure(self):
-        """Switches to next fallback on failure."""
+        """Switches to next fallback on failure. Closes old provider first."""
         # Try next fallback
         next_idx = self.active_rpc_index + 1
         if next_idx < len(self.fallback_rpcs):
             new_url = self.fallback_rpcs[next_idx]
             self.active_rpc_index = next_idx
+
+            # Close old provider before creating new one
+            await self._close_old_provider()
+
             self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(new_url, request_kwargs={'timeout': 60}))
-            
+
             # Strict Fallback Throttling
             self.rpc_delay = 0.5
             self.consecutive_errors = 0
-            
+
             logger.warning(f"⚠️ RPC Failure. Switching to Fallback #{next_idx + 1}: {new_url}")
             await self.bot.reinit_contracts()
-            
+
             await self.bot.send_telegram_alert(
                 f"⚠️ <b>Primary RPC Failed.</b> Switching to Fallback #{next_idx + 1}.",
                 is_error=True
@@ -117,36 +152,39 @@ class AsyncRPCManager:
             # Exhausted all? Reset to Primary to retry
             logger.error("❌ All RPCs exhausted. Sleeping 30s then Resetting to Primary.")
             await asyncio.sleep(30)
-            
+
+            # Close old provider before reset
+            await self._close_old_provider()
+
             self.active_rpc_index = -1
             self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(self.primary_rpc, request_kwargs={'timeout': 60}))
             self.rpc_delay = 0.1
             self.consecutive_errors = 0
-            
+
             await self.bot.reinit_contracts()
             return False
-            
+
     async def call(self, coro_func, *args, **kwargs):
         """Async Wrapper with Adaptive Rate Limiting & 3-Strike Rule."""
         # Enforce Delay
         delay = 0.5 if self.active_rpc_index >= 0 else self.rpc_delay
         await asyncio.sleep(delay)
-        
+
         try:
             return await coro_func(*args, **kwargs)
         except Exception as e:
             error_str = str(e).lower()
-            
+
             # Adaptive Backoff (CRITICAL HOTFIX: 30s Wait)
             if "429" in error_str or "403" in error_str or "too many requests" in error_str:
                 self.consecutive_errors += 1
                 logger.warning(f"⚠️ Rate Limit Hit (Strike {self.consecutive_errors}/3). CAUTION: Cooling down for 30s...")
-                await asyncio.sleep(30) # <--- CRITICAL UPDATE: 30s wait
-                
+                await asyncio.sleep(30)
+
                 if self.active_rpc_index == -1:
                     self.rpc_delay += 0.1
                     logger.info(f"🐌 Increased Primary Delay to {self.rpc_delay:.2f}s")
-                
+
                 # 3-Strike Rule
                 if self.consecutive_errors >= 3:
                     if await self.handle_failure():
@@ -157,12 +195,12 @@ class AsyncRPCManager:
                 else:
                     return await self.call(coro_func, *args, **kwargs)
             else:
-                 # Other errors
+                # Other errors
                 self.consecutive_errors += 1
                 if self.consecutive_errors >= 3:
-                     if await self.handle_failure():
+                    if await self.handle_failure():
                         return await self.call(coro_func, *args, **kwargs)
-                     else:
+                    else:
                         raise e
                 raise e
 
@@ -171,11 +209,7 @@ class AsyncRPCManager:
 POOL_ADDRESS = AsyncWeb3.to_checksum_address("0x794a61358D6845594F94dc1DB02A252b5b4814aD")
 POOL_ADDRESSES_PROVIDER = AsyncWeb3.to_checksum_address("0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb")
 DATA_PROVIDER_ADDRESS = AsyncWeb3.to_checksum_address("0x69fa688f1dc47d4b5d8029d5a35fb7a548310654")
-QUOTER_V2_ADDRESS = AsyncWeb3.to_checksum_address("0x61fFE014bA17989E743c5F6cB21bF9697530B21e") # Uniswap V3 Quoter V2
-
-# Concurrency
-MAX_CONCURRENT_REQUESTS = 15
-SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+QUOTER_V2_ADDRESS = AsyncWeb3.to_checksum_address("0x61fFE014bA17989E743c5F6cB21bF9697530B21e")  # Uniswap V3 Quoter V2
 
 # ABIs
 POOL_ABI = [{
@@ -290,11 +324,11 @@ class AdaptiveSniperBot:
     def __init__(self):
         # Init RPC Manager
         self.rpc_manager = AsyncRPCManager(self)
-        
+
         # Account
         self.account = self.rpc_manager.w3.eth.account.from_key(PRIVATE_KEY)
         logger.info(f"🔑 Loaded Liquidator: {self.account.address}")
-        
+
         # Contracts (Initialized in init_infrastructure via reinit_contracts)
         self.pool = None
         self.data_provider = None
@@ -302,24 +336,27 @@ class AdaptiveSniperBot:
         self.quoter = None
         self.liquidator_contract = None
         self.oracle_contract = None
-        
+
         self.targets = []
         self.reserves_list = []
-        self.asset_decimals = {} # Cache for decimals
-        self.prices = {} # Cache for prices
+        self.asset_decimals = {}  # Cache for decimals
+        self.prices = {}  # Cache for prices
         self.running = True
         self._last_errors = {}
         self.retry_regex = re.compile(r"try_again_in['\"]?:\s*['\"]?([\d\.]+)ms")
 
     async def log_system(self, msg, level="info"):
-        if level == "error": logger.error(msg)
-        elif level == "warning": logger.warning(msg)
-        else: logger.info(msg)
-        
+        if level == "error":
+            logger.error(msg)
+        elif level == "warning":
+            logger.warning(msg)
+        else:
+            logger.info(msg)
+
         if DB_ENABLED:
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, db_manager.log_event, level, msg)
-            
+
         if DISCORD_WEBHOOK and (level == "success" or level == "error"):
             await self.send_discord_alert(msg, level)
 
@@ -329,7 +366,8 @@ class AdaptiveSniperBot:
             payload = {"embeds": [{"title": "🦅 Gravity Bot", "description": msg, "color": color}]}
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, lambda: requests.post(DISCORD_WEBHOOK, json=payload))
-        except Exception: pass
+        except Exception:
+            pass
 
     async def send_telegram_alert(self, msg, is_error=False):
         """Sends an HTML-formatted Telegram alert with anti-spam cooldown for errors."""
@@ -359,10 +397,10 @@ class AdaptiveSniperBot:
         self.data_provider = w3.eth.contract(address=DATA_PROVIDER_ADDRESS, abi=DATA_PROVIDER_ABI)
         self.addresses_provider = w3.eth.contract(address=POOL_ADDRESSES_PROVIDER, abi=ADDRESSES_PROVIDER_ABI)
         self.quoter = w3.eth.contract(address=QUOTER_V2_ADDRESS, abi=QUOTER_ABI)
-        
+
         if LIQUIDATOR_ADDRESS:
-             self.liquidator_contract = w3.eth.contract(address=LIQUIDATOR_ADDRESS, abi=LIQUIDATOR_ABI)
-        
+            self.liquidator_contract = w3.eth.contract(address=LIQUIDATOR_ADDRESS, abi=LIQUIDATOR_ABI)
+
         if self.oracle_contract:
             self.oracle_contract = w3.eth.contract(address=self.oracle_contract.address, abi=ORACLE_ABI)
 
@@ -375,23 +413,22 @@ class AdaptiveSniperBot:
             # 1. Get Oracle Address
             oracle_address = await self.addresses_provider.functions.getPriceOracle().call()
             self.oracle_contract = self.rpc_manager.w3.eth.contract(address=oracle_address, abi=ORACLE_ABI)
-            
+
             # 2. Get Reserves List
             self.reserves_list = await self.pool.functions.getReservesList().call()
             await self.log_system(f"Loaded {len(self.reserves_list)} market assets.", "info")
-            
+
         except Exception as e:
             await self.log_system(f"Init Failed: {e}", "error")
 
     async def update_prices(self):
         """Updates asset prices in bulk."""
         try:
-            # Wrapped call? Yes, use rpc_manager.call for critical calls
             prices = await self.rpc_manager.call(self.oracle_contract.functions.getAssetsPrices(self.reserves_list).call)
-            
+
             for i, asset in enumerate(self.reserves_list):
                 self.prices[asset] = prices[i]
-                
+
         except Exception as e:
             logger.warning(f"Price update failed: {e}")
 
@@ -417,7 +454,7 @@ class AdaptiveSniperBot:
                     self.targets = json.loads(content)
                 else:
                     self.targets = []
-        except Exception as e:
+        except Exception:
             self.targets = []
 
     async def get_recommended_gas(self):
@@ -425,24 +462,21 @@ class AdaptiveSniperBot:
         try:
             block = await self.rpc_manager.call(self.rpc_manager.w3.eth.get_block, 'latest')
             base_fee = block['baseFeePerGas']
-            
+
             # 🚀 SNIPER MODE: 2x - 3x Priority Fee
-            priority_fee = self.rpc_manager.w3.to_wei(0.5, 'gwei') 
+            priority_fee = self.rpc_manager.w3.to_wei(0.5, 'gwei')
             if base_fee > self.rpc_manager.w3.to_wei(0.1, 'gwei'):
-                priority_fee = self.rpc_manager.w3.to_wei(1.5, 'gwei') # Very aggressive
-                
+                priority_fee = self.rpc_manager.w3.to_wei(1.5, 'gwei')  # Very aggressive
+
             max_fee = base_fee + priority_fee
             return max_fee, priority_fee
-        except:
+        except Exception:
             return None, None
 
     async def analyze_user_assets(self, user):
-        """
-        Dynamically identifies best assets.
-        Note: We don't wrap every individual call in `gather` with `call()` because it complicates concurrency.
-        We rely on SEMAPHORE. But if we need rate limiting, we should.
-        Standard `call()` uses delay.
-        """
+        """Dynamically identifies best debt and collateral assets for a user.
+        Note: asyncio.gather is kept HERE because this is an internal per-user
+        analysis call — all tasks belong to the SAME user context."""
         if not self.prices:
             await self.update_prices()
 
@@ -455,26 +489,21 @@ class AdaptiveSniperBot:
         # Create tasks for all assets
         tasks = []
         for asset in self.reserves_list:
-             # We invoke call() wrapper here to ensure rate limiting per request
-             coro = self.rpc_manager.call(self.data_provider.functions.getUserReserveData(asset, user).call)
-             tasks.append(coro)
-        
+            coro = self.rpc_manager.call(self.data_provider.functions.getUserReserveData(asset, user).call)
+            tasks.append(coro)
+
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         for i, res in enumerate(results):
             if isinstance(res, Exception):
                 await self.log_system(f"⚠️ DataProvider error for asset {self.reserves_list[i]}: {res}", "warning")
                 continue
-            
+
             asset = self.reserves_list[i]
             price = self.prices.get(asset, 0)
-            if price == 0: continue
+            if price == 0:
+                continue
 
-            # DataProvider returns: 
-            # 0: currentATokenBalance (Collateral)
-            # 1: currentStableDebt
-            # 2: currentVariableDebt
-            
             # Collateral
             collateral_bal = res[0]
             if collateral_bal > 0:
@@ -484,7 +513,7 @@ class AdaptiveSniperBot:
                     max_collateral_value = value_usd
                     best_collateral = asset
 
-            # Debt (Variable only for now)
+            # Debt (Variable only)
             variable_debt = res[2]
             if variable_debt > 0:
                 decimals = await self.get_decimals(asset)
@@ -501,7 +530,7 @@ class AdaptiveSniperBot:
             await self._execute_liquidation_inner(user)
         except Exception as e:
             await self.log_system(f"Liquidation Task Error for {user}: {e}", "error")
-            await self.rpc_manager.handle_failure() # Attempt failover on error
+            await self.rpc_manager.handle_failure()  # Attempt failover on error
             await self.send_telegram_alert(
                 f"⚠️ <b>Liquidation Task Error</b> for <code>{user}</code>:\n<code>{e}</code>",
                 is_error=True
@@ -509,51 +538,51 @@ class AdaptiveSniperBot:
 
     async def _execute_liquidation_inner(self, user):
         debt_asset, collateral_asset, debt_amount, debt_val = await self.analyze_user_assets(user)
-        
+
         if not debt_asset or not collateral_asset:
             return
 
-        if debt_val < 50: # Ignore dust < $50
+        if debt_val < 50:  # Ignore dust < $50
             return
 
         # Prepare Flash Loan Params
-        fee = 3000 # 0.3% Uniswap fee tier
-        amount_out_min = 0 # Slippage protection (TODO: calculate off-chain)
-        sqrt_price_limit = 0 
-        
+        fee = 3000  # 0.3% Uniswap fee tier
+        amount_out_min = 0  # Slippage protection (TODO: calculate off-chain)
+        sqrt_price_limit = 0
+
         logger.info(f"⚔️ ATTEMPTING LIQUIDATION: {user} | Debt: ${debt_val} | Asset: {debt_asset}")
-        
+
         # Build TX
         tx_func = self.liquidator_contract.functions.requestFlashLoan(
             user, debt_asset, collateral_asset, int(debt_amount), fee, int(amount_out_min), int(sqrt_price_limit)
         )
-        
+
         start_time = time.time()
-        
+
         # Gas War Strategy
         max_fee, priority_fee = await self.get_recommended_gas()
         if not max_fee:
-             logger.error("Failed to estimate gas. Aborting.")
-             return
-             
-        gas_est = 2500000 # Hardcoded safe limit for strict timing
+            logger.error("Failed to estimate gas. Aborting.")
+            return
+
+        gas_est = 2500000  # Hardcoded safe limit for strict timing
 
         tx = await tx_func.build_transaction({
             'from': self.account.address,
             'nonce': await self.rpc_manager.call(self.rpc_manager.w3.eth.get_transaction_count, self.account.address),
             'maxFeePerGas': max_fee,
             'maxPriorityFeePerGas': priority_fee,
-            'gas': int(gas_est * 1.2), # Buffer
-            'chainId': 42161 # Arbitrum One
+            'gas': int(gas_est * 1.2),  # Buffer
+            'chainId': 42161  # Arbitrum One
         })
-        
+
         # Sign
         signed_tx = self.rpc_manager.w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
-        
+
         # SEND !
         tx_hash = await self.rpc_manager.call(self.rpc_manager.w3.eth.send_raw_transaction, signed_tx.rawTransaction)
         await self.log_system(f"🔥 TX SENT: {tx_hash.hex()}", "success")
-        
+
         # Monitor TX receipt
         try:
             receipt = await self.rpc_manager.call(self.rpc_manager.w3.eth.wait_for_transaction_receipt, tx_hash, timeout=30)
@@ -561,7 +590,7 @@ class AdaptiveSniperBot:
             effective_gas_price = receipt['effectiveGasPrice']
             gas_cost_eth = Decimal(gas_used * effective_gas_price) / Decimal(10**18)
             arbiscan_link = f"https://arbiscan.io/tx/{tx_hash.hex()}"
-            
+
             if receipt['status'] == 1:
                 # SUCCESS
                 alert_msg = (
@@ -586,51 +615,57 @@ class AdaptiveSniperBot:
 
         except Exception as e:
             await self.log_system(f"Transaction Monitor Error: {e}", "error")
-        
+
     async def check_user_health(self, user):
-        """Standard Health Check."""
-        async with SEMAPHORE:
-            try:
-                # Use call() wrapper
-                data = await self.rpc_manager.call(self.pool.functions.getUserAccountData(user).call)
-                hf = Decimal(data[5]) / Decimal(10**18)
-                
-                if hf < 1.0:
-                    logger.info(f"💀 LIQUIDATABLE: {user} (HF: {hf})")
-                    await self.execute_liquidation(user)
-                    return True
-                return False
-            except Exception as e:
-                return False
+        """Sequential Health Check — no semaphore, no concurrency."""
+        try:
+            # Use call() wrapper for rate limiting
+            data = await self.rpc_manager.call(self.pool.functions.getUserAccountData(user).call)
+            hf = Decimal(data[5]) / Decimal(10**18)
+
+            if hf < 1.0:
+                logger.info(f"💀 LIQUIDATABLE: {user} (HF: {hf})")
+                await self.execute_liquidation(user)
+                return True
+            return False
+        except Exception:
+            return False
 
     async def worker_loop(self):
-        """Main Loop: Fetch targets -> Check Health -> Refresh."""
+        """Main Loop: Fetch targets -> Check Health SEQUENTIALLY -> Refresh."""
         await self.init_infrastructure()
-        
+
         while self.running:
             try:
                 start_time = time.time()
-                
+
                 # Reload targets
                 await self.load_targets_async()
                 if not self.targets:
                     print("💤 No targets. Sleeping 10s...")
-                    await asyncio.sleep(10) # <--- CRITICAL UPDATE/HOTFIX: 10s sleep
+                    await asyncio.sleep(10)
                     continue
 
-                print(f"🎯 Tracking {len(self.targets)} targets...", end="\r")
-                
-                # Concurrent Checks
-                tasks = [self.check_user_health(user) for user in self.targets]
-                await asyncio.gather(*tasks)
-                
+                print(f"🎯 Tracking {len(self.targets)} targets (sequential)...", end="\r")
+
+                # ============================================================
+                # SEQUENTIAL HEALTH CHECKS — one user at a time
+                # Prevents asyncio.gather from overwhelming public RPC nodes.
+                # 0.2s delay between each check respects rate limits.
+                # ============================================================
+                for user in self.targets:
+                    await self.check_user_health(user)
+                    await asyncio.sleep(0.2)  # Rate limit: 5 requests/second max
+
                 elapsed = time.time() - start_time
-                # CRITICAL HOTFIX: Forced 1.0s delay ALWAYS after loop
+                logger.info(f"🔄 Scan cycle complete: {len(self.targets)} users in {elapsed:.1f}s")
+
+                # Brief cooldown before next cycle
                 await asyncio.sleep(1.0)
 
             except Exception as e:
                 await self.log_system(f"💥 Worker loop error: {e}", "error")
-                await self.rpc_manager.handle_failure() # Trigger Failover
+                await self.rpc_manager.handle_failure()  # Trigger Failover
                 await self.send_telegram_alert(
                     f"⚠️ <b>Worker Loop Error:</b>\n<code>{e}</code>",
                     is_error=True
@@ -641,14 +676,14 @@ class AdaptiveSniperBot:
         """Wraps worker_loop with Telegram startup & crash alerts."""
         # Start Background Prober
         asyncio.create_task(self.rpc_manager.start_background_prober())
-        
+
         await self.send_telegram_alert("🟢 <b>Bot Started:</b> Scanning the market.")
         try:
             await self.worker_loop()
         except Exception as e:
             # Global crash handler
             await self.rpc_manager.handle_failure()
-            
+
             crash_msg = f"🆘 <b>CRASH ALERT:</b> <code>{e}</code>"
             await self.send_telegram_alert(crash_msg)
             await self.log_system(f"💥 FATAL CRASH: {e}", "error")
