@@ -151,7 +151,8 @@ UNDERLYING_ASSETS = {
 
 # Transfer Event: Transfer(from, to, value)
 # In debt tokens, this means debt moved (minted/burned)
-TRANSFER_TOPIC = Web3.keccak(text="Transfer(address,address,uint256)").hex()
+# CRITICAL FIX: Use Web3.to_hex to ensure 0x prefix for strict RPC nodes
+TRANSFER_TOPIC = Web3.to_hex(Web3.keccak(text="Transfer(address,address,uint256)"))
 
 # SETTINGS
 TOTAL_BLOCKS_TO_SCAN = 50000   # Check last ~4 hours
