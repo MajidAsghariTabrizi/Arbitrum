@@ -31,15 +31,15 @@ except ImportError:
     logger.warning("⚠️ db_manager.py not found. Dashboard logging disabled.")
 
 # Configuration Constants
-RPC_URL = os.getenv("RPC_URL")
+PRIMARY_RPC = os.getenv("PRIMARY_RPC")
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
 LIQUIDATOR_ADDRESS = os.getenv("LIQUIDATOR_ADDRESS")
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-if not RPC_URL or not PRIVATE_KEY:
-    logger.error("❌ Critical Error: Missing RPC_URL or PRIVATE_KEY")
+if not PRIMARY_RPC or not PRIVATE_KEY:
+    logger.error("❌ Critical Error: Missing PRIMARY_RPC or PRIVATE_KEY")
     exit(1)
 
 
