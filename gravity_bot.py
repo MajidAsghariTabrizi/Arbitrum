@@ -520,7 +520,7 @@ class GravityBot:
         # Build a list of (target, callData) tuples for aggregate()
         calls = []
         for user in self.targets:
-            call_data = self.pool.encodeABI(fn_name="getUserAccountData", args=[user])
+            call_data = self.pool.functions.getUserAccountData(user)._encode_transaction_data()
             calls.append((POOL_ADDRESS, call_data))
 
         try:
