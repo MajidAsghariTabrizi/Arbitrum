@@ -3,13 +3,13 @@ import json
 import asyncio
 import logging
 import time
-import random
 import warnings
 from decimal import Decimal
 import aiofiles
 import requests
 from web3 import AsyncWeb3
 from dotenv import load_dotenv
+from eth_abi import decode
 
 # Suppress ResourceWarning for cleaner logs
 warnings.filterwarnings("ignore", category=ResourceWarning)
@@ -53,15 +53,15 @@ if not PRIVATE_KEY or not LIQUIDATOR_ADDRESS:
 # Polling Config
 POLL_INTERVAL = 0.1         # 100ms — check for new blocks rapidly
 
-# Concurrency Config — max parallel RPC calls for health checks
-# Safe for free RPCs: 8 concurrent requests balances speed vs. rate limits
-SCAN_SEMAPHORE_LIMIT = 5
-
 # Arbitrum One Addresses (EIP-55 Checksummed)
 POOL_ADDRESS = AsyncWeb3.to_checksum_address("0x794a61358D6845594F94dc1DB02A252b5b4814aD")
 POOL_ADDRESSES_PROVIDER = AsyncWeb3.to_checksum_address("0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb")
 DATA_PROVIDER_ADDRESS = AsyncWeb3.to_checksum_address("0x69fa688f1dc47d4b5d8029d5a35fb7a548310654")
 QUOTER_V2_ADDRESS = AsyncWeb3.to_checksum_address("0x61fFE014bA17989E743c5F6cB21bF9697530B21e")
+
+# Multicall3 — Arbitrum One (EIP-55 Checksummed)
+MULTICALL3_ADDRESS = AsyncWeb3.to_checksum_address("0xcA11bde05977b3631167028862bE2a173976CA11")
+MULTICALL3_ABI = [{"inputs":[{"components":[{"internalType":"address","name":"target","type":"address"},{"internalType":"bytes","name":"callData","type":"bytes"}],"internalType":"struct Multicall3.Call[]","name":"calls","type":"tuple[]"}],"name":"aggregate","outputs":[{"internalType":"uint256","name":"blockNumber","type":"uint256"},{"internalType":"bytes[]","name":"returnData","type":"bytes[]"}],"stateMutability":"view","type":"function"}]
 
 # ABIs
 POOL_ABI = [{
@@ -220,7 +220,6 @@ class GravityBot:
 
         # Concurrency
         self.nonce_lock = asyncio.Lock()
-        self.scan_semaphore = asyncio.Semaphore(SCAN_SEMAPHORE_LIMIT)
         self._last_errors = {}
 
     @property
@@ -240,6 +239,9 @@ class GravityBot:
         # Fetch Oracle address dynamically
         oracle_addr = await self.addresses_provider.functions.getPriceOracle().call()
         self.oracle_contract = self.w3.eth.contract(address=oracle_addr, abi=ORACLE_ABI)
+
+        # Multicall3 — used for batched health-factor checks
+        self.multicall = self.w3.eth.contract(address=MULTICALL3_ADDRESS, abi=MULTICALL3_ABI)
 
         # Cache reserves list
         self.reserves_list = await self.pool.functions.getReservesList().call()
@@ -502,30 +504,8 @@ class GravityBot:
                 is_error=True
             )
 
-    async def check_user_health(self, user):
-        """Semaphore-gated health check with jitter for WAF evasion.
-        
-        The semaphore limits concurrent RPC calls to SCAN_SEMAPHORE_LIMIT.
-        The random micro-sleep (10-100ms) staggers requests so they look
-        like organic traffic rather than a bot burst to free RPC WAFs.
-        """
-        async with self.scan_semaphore:
-            # Jitter: stagger requests by 10-100ms to defeat burst detection
-            await asyncio.sleep(random.uniform(0.01, 0.1))
-            try:
-                data = await self.pool.functions.getUserAccountData(user).call()
-                hf = Decimal(data[5]) / Decimal(10**18)
-
-                if hf < 1.0 and hf > 0:
-                    logger.info(f"💀 LIQUIDATABLE: {user} (HF: {hf})")
-                    await self.execute_liquidation(user)
-            except Exception as e:
-                err_str = str(e).lower()
-                if "429" in err_str or "rate" in err_str:
-                    await self.rpc.handle_rate_limit()
-
     async def process_block(self, block_number):
-        """Process a single new block: update prices, check all targets concurrently."""
+        """Process a single new block: batch-check all targets via Multicall3."""
         start_time = time.time()
 
         # 1. Update Prices
@@ -536,12 +516,40 @@ class GravityBot:
         if not self.targets:
             return
 
-        # 3. Concurrent Health Checks — gated by scan_semaphore
-        # asyncio.gather fires all tasks; semaphore limits to SCAN_SEMAPHORE_LIMIT
-        # concurrent RPC calls at any time. return_exceptions=True prevents one
-        # failed check from cancelling all others.
-        tasks = [self.check_user_health(user) for user in self.targets]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        # 3. Batch Health Checks via Multicall3
+        # Build a list of (target, callData) tuples for aggregate()
+        calls = []
+        for user in self.targets:
+            call_data = self.pool.encodeABI(fn_name="getUserAccountData", args=[user])
+            calls.append((POOL_ADDRESS, call_data))
+
+        try:
+            # Single batched RPC call replaces N individual calls
+            _, return_data = await self.multicall.functions.aggregate(calls).call()
+        except Exception as e:
+            err_str = str(e).lower()
+            if "429" in err_str or "rate" in err_str:
+                await self.rpc.handle_rate_limit()
+            else:
+                logger.error(f"❌ Multicall failed on block {block_number}: {e}")
+            return
+
+        # 4. Decode results and check for liquidatable positions
+        for i, raw_bytes in enumerate(return_data):
+            user = self.targets[i]
+            try:
+                decoded_data = decode(
+                    ['uint256', 'uint256', 'uint256', 'uint256', 'uint256', 'uint256'],
+                    raw_bytes
+                )
+                hf = Decimal(decoded_data[5]) / Decimal(10**18)
+
+                if 0 < hf < Decimal('1.0'):
+                    logger.info(f"💀 LIQUIDATABLE: {user} (HF: {hf})")
+                    await self.execute_liquidation(user)
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to decode data for {user}: {e}")
+                continue
 
         elapsed = (time.time() - start_time) * 1000
         logger.info(f"🧱 Block {block_number} scanned. {len(self.targets)} targets in {elapsed:.0f}ms")
