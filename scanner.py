@@ -4,6 +4,7 @@ import time
 import requests
 from web3 import Web3
 from dotenv import load_dotenv
+from eth_abi import decode
 
 # Load Env
 load_dotenv()
@@ -86,8 +87,8 @@ class SyncRPCManager:
         except Exception as e:
             error_str = str(e).lower()
 
-            # Adaptive Backoff for Rate Limits (CRITICAL HOTFIX: 30s Wait)
-            if "429" in error_str or "403" in error_str or "too many requests" in error_str:
+            # Adaptive Backoff for Rate Limits (handles 429 AND 403)
+            if "429" in error_str or "403" in error_str or "too many requests" in error_str or "forbidden" in error_str:
                 self.consecutive_errors += 1
                 print(f"⚠️ Rate Limit Hit (Strike {self.consecutive_errors}/3). CAUTION: Cooling down for 30s...")
                 time.sleep(30)
@@ -122,8 +123,29 @@ rpc_manager = SyncRPCManager()
 
 # --- CONFIGURATION ---
 
-# Aave V3 Arbitrum PoolDataProvider (Checksummed)
+# Aave V3 Arbitrum Addresses (Checksummed)
+POOL_ADDRESS = Web3.to_checksum_address("0x794a61358D6845594F94dc1DB02A252b5b4814aD")
 DATA_PROVIDER_ADDRESS = Web3.to_checksum_address("0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654")
+
+# Multicall3 — Arbitrum One
+MULTICALL3_ADDRESS = Web3.to_checksum_address("0xcA11bde05977b3631167028862bE2a173976CA11")
+MULTICALL3_ABI = [{"inputs":[{"components":[{"internalType":"address","name":"target","type":"address"},{"internalType":"bytes","name":"callData","type":"bytes"}],"internalType":"struct Multicall3.Call[]","name":"calls","type":"tuple[]"}],"name":"aggregate","outputs":[{"internalType":"uint256","name":"blockNumber","type":"uint256"},{"internalType":"bytes[]","name":"returnData","type":"bytes[]"}],"stateMutability":"view","type":"function"}]
+
+# Pool ABI — getUserAccountData for HF classification
+POOL_ABI = [{
+    "inputs": [{"internalType": "address", "name": "user", "type": "address"}],
+    "name": "getUserAccountData",
+    "outputs": [
+        {"internalType": "uint256", "name": "totalCollateralBase", "type": "uint256"},
+        {"internalType": "uint256", "name": "totalDebtBase", "type": "uint256"},
+        {"internalType": "uint256", "name": "availableBorrowsBase", "type": "uint256"},
+        {"internalType": "uint256", "name": "currentLiquidationThreshold", "type": "uint256"},
+        {"internalType": "uint256", "name": "ltv", "type": "uint256"},
+        {"internalType": "uint256", "name": "healthFactor", "type": "uint256"}
+    ],
+    "stateMutability": "view",
+    "type": "function"
+}]
 
 # ABI: getReserveTokensAddresses(address asset) -> (aToken, stableDebtToken, variableDebtToken)
 DATA_PROVIDER_ABI = [{
@@ -153,9 +175,16 @@ UNDERLYING_ASSETS = {
 # CRITICAL FIX: Use Web3.to_hex to ensure 0x prefix for strict RPC nodes
 TRANSFER_TOPIC = Web3.to_hex(Web3.keccak(text="Transfer(address,address,uint256)"))
 
-# SETTINGS — MICRO-CHUNKING FOR PUBLIC NODE SAFETY
+# SETTINGS
 TOTAL_BLOCKS_TO_SCAN = 50000   # Check last ~4 hours
-CHUNK_SIZE = 2000              # <<< ARCHITECTURAL FIX: 2000 blocks per chunk (was 50)
+CHUNK_SIZE = 2000              # 2000 blocks per chunk
+SCAN_INTERVAL = 600            # 10 minutes between scans
+MULTICALL_BATCH_SIZE = 150     # Max addresses per Multicall3 batch
+
+# Tier Thresholds
+TIER_1_MAX_HF = 1.050   # Danger: 1.000 – 1.050
+TIER_2_MAX_HF = 1.200   # Watchlist: 1.051 – 1.200
+                         # Discard: > 1.200
 
 # Anti-spam cooldown for error alerts
 LAST_ERRORS = {}
@@ -221,17 +250,111 @@ def get_target_path():
     return "targets.json"
 
 
-def save_targets_atomic(targets_list):
+def save_targets_atomic(targets_data):
     """Atomically writes targets to JSON using temp file + os.replace().
-    Prevents JSON decode errors if the bot reads during a write."""
+    Prevents JSON decode errors if the bot reads during a write.
+    
+    Args:
+        targets_data: dict with 'tier_1_danger' and 'tier_2_watchlist' keys,
+                      or a flat list (backward compat during progressive scan)
+    """
     target_path = get_target_path()
     temp_path = target_path + ".tmp"
     with open(temp_path, "w") as f:
-        json.dump(targets_list, f)
+        json.dump(targets_data, f, indent=2)
     os.replace(temp_path, target_path)
 
 
+def classify_targets_multicall(all_users_list):
+    """
+    Batch-classify all discovered users into Tier 1 / Tier 2 using Multicall3.
+    
+    Uses getUserAccountData to read Health Factor for every user in one batched call.
+    - Tier_1_Danger:    HF between 1.000 and 1.050
+    - Tier_2_Watchlist: HF between 1.051 and 1.200
+    - Discarded:        HF > 1.200 or HF == 0 (no debt)
+    
+    Returns:
+        dict: {"tier_1_danger": [...], "tier_2_watchlist": [...]}
+    """
+    w3 = rpc_manager.w3
+    pool = w3.eth.contract(address=POOL_ADDRESS, abi=POOL_ABI)
+    multicall = w3.eth.contract(address=MULTICALL3_ADDRESS, abi=MULTICALL3_ABI)
+
+    tier_1 = []
+    tier_2 = []
+    discarded = 0
+
+    # Process in batches to avoid gas limit on Multicall3
+    for batch_start in range(0, len(all_users_list), MULTICALL_BATCH_SIZE):
+        batch = all_users_list[batch_start:batch_start + MULTICALL_BATCH_SIZE]
+
+        # Build calldata for this batch
+        calls = []
+        for user in batch:
+            try:
+                call_data = pool.functions.getUserAccountData(
+                    Web3.to_checksum_address(user)
+                )._encode_transaction_data()
+                calls.append((POOL_ADDRESS, call_data))
+            except Exception:
+                continue
+
+        if not calls:
+            continue
+
+        try:
+            _, return_data = rpc_manager.call(
+                multicall.functions.aggregate(calls).call
+            )
+        except Exception as e:
+            print(f"  ⚠️ Multicall batch failed (offset {batch_start}): {e}")
+            continue
+
+        # Decode each result
+        for i, raw_bytes in enumerate(return_data):
+            user = batch[i]
+            try:
+                decoded = decode(
+                    ['uint256', 'uint256', 'uint256', 'uint256', 'uint256', 'uint256'],
+                    raw_bytes
+                )
+                # healthFactor is index 5, 18 decimals
+                hf_raw = decoded[5]
+
+                # HF == 0 means no debt — skip
+                if hf_raw == 0:
+                    discarded += 1
+                    continue
+
+                hf = hf_raw / 1e18
+
+                if hf < TIER_1_MAX_HF:
+                    # Tier 1: Danger (HF 1.000 – 1.050)
+                    tier_1.append(user)
+                elif hf < TIER_2_MAX_HF:
+                    # Tier 2: Watchlist (HF 1.051 – 1.200)
+                    tier_2.append(user)
+                else:
+                    # HF > 1.200 — discard to keep JSON small
+                    discarded += 1
+
+            except Exception:
+                discarded += 1
+                continue
+
+        # Throttle between batches
+        time.sleep(0.5)
+
+        progress = min(batch_start + MULTICALL_BATCH_SIZE, len(all_users_list))
+        print(f"  📊 Classified {progress}/{len(all_users_list)} | "
+              f"T1: {len(tier_1)} | T2: {len(tier_2)} | Discarded: {discarded}")
+
+    return {"tier_1_danger": tier_1, "tier_2_watchlist": tier_2}
+
+
 def scan_debt_tokens():
+    """Phase 1: Discover borrower addresses from Transfer events on debt tokens."""
     global RPC_WAS_DOWN
 
     # 1. Proactive Health Check (Auto-Recovery)
@@ -251,7 +374,7 @@ def scan_debt_tokens():
         if not RPC_WAS_DOWN:
             send_telegram_alert(f"⚠️ <b>Scanner RPC Down:</b>\n<code>{error_msg}</code>", is_error=True)
             RPC_WAS_DOWN = True
-        return []
+        return {"tier_1_danger": [], "tier_2_watchlist": []}
 
     # RPC recovered — send recovery alert if it was previously down
     if RPC_WAS_DOWN:
@@ -263,7 +386,7 @@ def scan_debt_tokens():
     token_map = build_token_map()
     if not token_map:
         print("❌ Could not load any debt tokens. Aborting scan.")
-        return []
+        return {"tier_1_danger": [], "tier_2_watchlist": []}
     print(f"🎯 Loaded {len(token_map)} debt tokens.\n")
 
     start_block = current_block - TOTAL_BLOCKS_TO_SCAN
@@ -319,13 +442,6 @@ def scan_debt_tokens():
                             all_users.add(addr2)
 
                 # ============================================================
-                # ATOMIC PROGRESSIVE SAVE — after EVERY chunk, not just per token
-                # Ensures no data loss during long 10,000,000 block scans.
-                # ============================================================
-                if len(all_users) > 0:
-                    save_targets_atomic(list(all_users))
-
-                # ============================================================
                 # HARD THROTTLE — 1.0s cooldown after every single chunk
                 # Public nodes reject rapid-fire eth_getLogs requests.
                 # ============================================================
@@ -336,39 +452,62 @@ def scan_debt_tokens():
             send_telegram_alert(f"⚠️ <b>Scanner Error</b> on <code>{name}</code>:\n<code>{e}</code>", is_error=True)
             continue
 
-    final_list = list(all_users)
-
     # --- FALLBACK MECHANISM ---
     # If network is super quiet, add some known active whales so bot is not empty
-    if len(final_list) == 0:
+    if len(all_users) == 0:
         print("\n⚠️ Network quiet. Adding fallback targets (Active Whales) to ensure bot runs.")
         fallback_targets = [
             "0x99525208453488C9518001712C7F72428514197F",
             "0x5a52E96BAcdaBb82fd05763E25335261B270Efcb",
             "0xF977814e90dA44bFA03b6295A0616a897441aceC"
         ]
-        final_list.extend(fallback_targets)
+        all_users.update(fallback_targets)
 
-    print(f"\n\n✅ Scan Complete. Total Targets: {len(final_list)}")
-    return final_list
+    all_users_list = list(all_users)
+    print(f"\n\n✅ Phase 1 Complete. {len(all_users_list)} unique borrowers discovered.")
+
+    # ================================================================
+    # PHASE 2: Classify all discovered users via Multicall3 batch HF check
+    # ================================================================
+    print(f"\n🔬 Phase 2: Classifying {len(all_users_list)} users into Tiers via Multicall3...")
+    tiered_result = classify_targets_multicall(all_users_list)
+
+    print(f"\n📊 Classification Complete:")
+    print(f"  🔴 Tier 1 (Danger):    {len(tiered_result['tier_1_danger'])} targets")
+    print(f"  🟠 Tier 2 (Watchlist): {len(tiered_result['tier_2_watchlist'])} targets")
+
+    return tiered_result
+
 
 if __name__ == "__main__":
-    send_telegram_alert("🟢 <b>Radar Scanner Started:</b> Hunting for whale debts (5-min intervals).")
+    send_telegram_alert("🟢 <b>Radar Scanner Started:</b> Hunting for whale debts (10-min intervals).")
     try:
         while True:
             try:
                 print("\n🔍 Starting new radar scan...")
-                targets = scan_debt_tokens()
+                start = time.time()
+                tiered_targets = scan_debt_tokens()
 
-                # Final atomic save (Cache Retention: only if we have targets)
-                if len(targets) > 0:
-                    save_targets_atomic(targets)
-                    print(f"💾 Final save: {len(targets)} targets to '{get_target_path()}'")
+                total = len(tiered_targets['tier_1_danger']) + len(tiered_targets['tier_2_watchlist'])
+                elapsed = time.time() - start
+
+                # Atomic save (only if we have targets)
+                if total > 0:
+                    save_targets_atomic(tiered_targets)
+                    print(f"💾 Saved: {total} targets to '{get_target_path()}' ({elapsed:.0f}s)")
+
+                    # Telegram summary
+                    send_telegram_alert(
+                        f"📡 <b>Radar Scan Complete</b>\n"
+                        f"🔴 Tier 1 (Danger): {len(tiered_targets['tier_1_danger'])}\n"
+                        f"🟠 Tier 2 (Watchlist): {len(tiered_targets['tier_2_watchlist'])}\n"
+                        f"⏱️ Duration: {elapsed:.0f}s"
+                    )
                 else:
                     print("⚠️ Scan returned 0 targets. Keeping previous targets in cache.")
 
-                print("⏳ Sleeping for 300 seconds (5 mins)...")
-                time.sleep(300)
+                print(f"⏳ Sleeping for {SCAN_INTERVAL} seconds ({SCAN_INTERVAL // 60} mins)...")
+                time.sleep(SCAN_INTERVAL)
 
             except Exception as e:
                 print(f"❌ Radar Error: {e}")

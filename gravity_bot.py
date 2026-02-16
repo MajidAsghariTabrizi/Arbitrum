@@ -24,7 +24,7 @@ load_dotenv(ENV_PATH)
 
 # Logging Setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
-logger = logging.getLogger("GravityBot")
+logger = logging.getLogger("AntiGravity")
 
 # Database & Notification Setup
 try:
@@ -51,7 +51,12 @@ if not PRIVATE_KEY or not LIQUIDATOR_ADDRESS:
     exit(1)
 
 # Polling Config
-POLL_INTERVAL = 0.1         # 100ms — check for new blocks rapidly
+POLL_INTERVAL = 0.1          # 100ms — check for new blocks rapidly
+SCOUT_INTERVAL = 10          # Scout (Tier 2) runs every N blocks
+
+# Tier Thresholds (must match scanner.py)
+TIER_1_MAX_HF = Decimal('1.050')
+TIER_2_MAX_HF = Decimal('1.200')
 
 # Arbitrum One Addresses (EIP-55 Checksummed)
 POOL_ADDRESS = AsyncWeb3.to_checksum_address("0x794a61358D6845594F94dc1DB02A252b5b4814aD")
@@ -147,10 +152,10 @@ ERC20_ABI = [{
 }]
 
 
-# --- 2. ASYNC RPC MANAGER ---
+# --- 2. ASYNC RPC MANAGER (Enhanced: 403 support) ---
 
 class AsyncRPCManager:
-    """Manages RPC endpoints with automatic failover."""
+    """Manages RPC endpoints with automatic failover for 429 AND 403 errors."""
     def __init__(self):
         self.endpoints = [PRIMARY_RPC] + FALLBACK_RPCS
         self.current_index = 0
@@ -179,7 +184,7 @@ class AsyncRPCManager:
         logger.info(f"🟢 Connected to RPC [{self.current_index + 1}/{len(self.endpoints)}]")
 
     async def handle_rate_limit(self):
-        """Handle 429 errors with adaptive backoff and failover."""
+        """Handle 429/403 errors with adaptive backoff and failover."""
         self.strike_count += 1
         self.last_rate_limit = time.time()
 
@@ -193,10 +198,20 @@ class AsyncRPCManager:
             logger.warning(f"⏳ Rate limited (Strike {self.strike_count}/3). Cooling down {cooldown}s...")
             await asyncio.sleep(cooldown)
 
+    def is_rate_limit_error(self, error):
+        """Check if an error is a rate limit / forbidden error."""
+        err_str = str(error).lower()
+        return "429" in err_str or "403" in err_str or "rate" in err_str or "forbidden" in err_str
 
-# --- 3. ASYNC BOT CLASS ---
 
-class GravityBot:
+# --- 3. ANTI-GRAVITY BOT CLASS ---
+
+class AntiGravityBot:
+    """
+    Anti-Gravity MEV Sniper — Dual-task architecture:
+      Task A (Sniper): Scans Tier 1 (Danger) targets every block via Multicall3.
+      Task B (Scout):  Scans Tier 2 (Watchlist) every 10 blocks, promotes to Tier 1.
+    """
     def __init__(self):
         # RPC Manager
         self.rpc = AsyncRPCManager()
@@ -209,14 +224,20 @@ class GravityBot:
         self.liquidator_contract = None
         self.oracle_contract = None
 
+        # ================================================================
+        # RAM PRIORITY QUEUE — Tiered target lists loaded from targets.json
+        # ================================================================
+        self.tier_1_danger = []      # HF 1.000 – 1.050 (scanned every block)
+        self.tier_2_watchlist = []    # HF 1.051 – 1.200 (scanned every 10 blocks)
+
         # Data
-        self.targets = []
         self.reserves_list = []
         self.asset_decimals = {}
         self.prices = {}
 
         # Block Tracking
         self.last_processed_block = 0
+        self.blocks_since_scout = 0  # Counter for scout interval
 
         # Concurrency
         self.nonce_lock = asyncio.Lock()
@@ -265,7 +286,7 @@ class GravityBot:
     async def send_discord_alert(self, msg, level):
         try:
             color = 0x00ff00 if level == "success" else 0xff0000
-            payload = {"embeds": [{"title": "🦅 Gravity Bot", "description": msg, "color": color}]}
+            payload = {"embeds": [{"title": "🦅 Anti-Gravity Bot", "description": msg, "color": color}]}
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, lambda: requests.post(DISCORD_WEBHOOK, json=payload))
         except Exception:
@@ -312,18 +333,36 @@ class GravityBot:
         except Exception:
             return 18
 
+    # ================================================================
+    # DYNAMIC RAM LOADING — Read tiered targets.json without blocking
+    # ================================================================
+
     async def load_targets_async(self):
-        """Reloads targets.json asynchronously."""
+        """Reloads targets.json asynchronously into tiered RAM queues.
+        Supports both structured (tiered) and flat (legacy) formats."""
         try:
             path = "/root/Arbitrum/targets.json" if os.path.exists("/root/Arbitrum") else "targets.json"
             async with aiofiles.open(path, mode='r') as f:
                 content = await f.read()
-                if content:
-                    self.targets = json.loads(content)
+                if not content:
+                    return
+
+                data = json.loads(content)
+
+                if isinstance(data, dict):
+                    # Structured tiered format from new scanner
+                    self.tier_1_danger = data.get("tier_1_danger", [])
+                    self.tier_2_watchlist = data.get("tier_2_watchlist", [])
+                elif isinstance(data, list):
+                    # Legacy flat array — treat all as Tier 1
+                    self.tier_1_danger = data
+                    self.tier_2_watchlist = []
                 else:
-                    self.targets = []
-        except Exception:
-            self.targets = []
+                    self.tier_1_danger = []
+                    self.tier_2_watchlist = []
+
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to load targets: {e}")
 
     async def analyze_user_assets(self, user):
         """Finds best debt and collateral for a liquidatable user."""
@@ -372,8 +411,26 @@ class GravityBot:
 
         return best_debt, best_collateral, debt_amount_raw, max_debt_value
 
+    # ================================================================
+    # PRE-FLIGHT SIMULATION — Simulate TX before broadcasting
+    # ================================================================
+
+    async def simulate_liquidation(self, tx_func, user):
+        """Simulate the transaction via eth_call. Returns True if it would succeed."""
+        try:
+            await tx_func.call({'from': self.account.address})
+            logger.info(f"✅ Pre-flight PASS for {user[:10]}... — TX will succeed")
+            return True
+        except Exception as e:
+            err_str = str(e)
+            logger.warning(f"🚫 Pre-flight FAIL for {user[:10]}...: {err_str}")
+            await self.log_system(
+                f"🚫 Simulation reverted for {user}: {err_str}", "warning"
+            )
+            return False
+
     async def execute_liquidation(self, user):
-        """Builds, signs, and sends Flash Loan liquidation transaction."""
+        """Builds, simulates, signs, and sends Flash Loan liquidation transaction."""
         debt_asset, collateral_asset, debt_amount, debt_val = await self.analyze_user_assets(user)
 
         if not debt_asset or not collateral_asset or debt_val < 50:
@@ -409,6 +466,15 @@ class GravityBot:
             int(amount_out_min),
             int(sqrt_price_limit)
         )
+
+        # ==============================================================
+        # PRE-FLIGHT SIMULATION — simulate via eth_call before broadcasting
+        # If the TX would revert, skip it to avoid wasting gas.
+        # ==============================================================
+        sim_pass = await self.simulate_liquidation(tx_func, user)
+        if not sim_pass:
+            logger.warning(f"🚫 DROPPING target {user} — simulation reverted. Will not broadcast.")
+            return
 
         try:
             # ============================================================
@@ -504,22 +570,21 @@ class GravityBot:
                 is_error=True
             )
 
-    async def process_block(self, block_number):
-        """Process a single new block: batch-check all targets via Multicall3."""
-        start_time = time.time()
+    # ================================================================
+    # MULTICALL3 BATCH SCAN — Shared logic for Sniper & Scout
+    # ================================================================
 
-        # 1. Update Prices
-        await self.update_prices()
+    async def multicall_scan(self, targets, task_name, block_number):
+        """
+        Batch-check a list of targets via Multicall3.
+        Returns list of (user, hf_decimal, collateral_usd, debt_usd) tuples.
+        """
+        if not targets:
+            return []
 
-        # 2. Reload targets
-        await self.load_targets_async()
-        if not self.targets:
-            return
-
-        # 3. Batch Health Checks via Multicall3
-        # Build a list of (target, callData) tuples for aggregate()
+        # Build calldata
         calls = []
-        for user in self.targets:
+        for user in targets:
             call_data = self.pool.functions.getUserAccountData(user)._encode_transaction_data()
             calls.append((POOL_ADDRESS, call_data))
 
@@ -527,25 +592,22 @@ class GravityBot:
             # Single batched RPC call replaces N individual calls
             _, return_data = await self.multicall.functions.aggregate(calls).call()
         except Exception as e:
-            err_str = str(e).lower()
-            if "429" in err_str or "rate" in err_str:
+            if self.rpc.is_rate_limit_error(e):
                 await self.rpc.handle_rate_limit()
             else:
-                logger.error(f"❌ Multicall failed on block {block_number}: {e}")
-            return
+                logger.error(f"❌ [{task_name}] Multicall failed on block {block_number}: {e}")
+            return []
 
-        # 4. Decode results, extract live data, and check for liquidatable positions
-        live_targets_data = []  # For dashboard DB push
-
+        # Decode results
+        results = []
         for i, raw_bytes in enumerate(return_data):
-            user = self.targets[i]
+            user = targets[i]
             try:
                 decoded_data = decode(
                     ['uint256', 'uint256', 'uint256', 'uint256', 'uint256', 'uint256'],
                     raw_bytes
                 )
 
-                # --- Extract USD values for monitoring dashboard ---
                 # Aave V3 getUserAccountData returns:
                 #   [0] totalCollateralBase  (USD, 8 decimals)
                 #   [1] totalDebtBase        (USD, 8 decimals)
@@ -553,29 +615,134 @@ class GravityBot:
                 total_collateral_usd = float(Decimal(decoded_data[0]) / Decimal(10**8))
                 total_debt_usd = float(Decimal(decoded_data[1]) / Decimal(10**8))
                 hf = Decimal(decoded_data[5]) / Decimal(10**18)
-                hf_float = float(hf)
 
-                # Collect for async DB push
-                live_targets_data.append((user, hf_float, total_debt_usd, total_collateral_usd))
+                results.append((user, hf, total_collateral_usd, total_debt_usd))
 
-                if 0 < hf < Decimal('1.0'):
-                    logger.info(f"💀 LIQUIDATABLE: {user} (HF: {hf})")
-                    await self.execute_liquidation(user)
             except Exception as e:
-                logger.warning(f"⚠️ Failed to decode data for {user}: {e}")
+                logger.warning(f"⚠️ [{task_name}] Failed to decode data for {user}: {e}")
                 continue
 
-        elapsed = (time.time() - start_time) * 1000
-        logger.info(f"🧱 Block {block_number} scanned. {len(self.targets)} targets in {elapsed:.0f}ms")
+        return results
 
-        # 5. Async DB push — fire-and-forget via asyncio.to_thread (zero main-loop impact)
+    # ================================================================
+    # TASK A: THE SNIPER — Tier 1 every block
+    # ================================================================
+
+    async def sniper_scan(self, block_number):
+        """Process Tier 1 (Danger) targets: check HF and liquidate if < 1.0."""
+        start_time = time.time()
+
+        results = await self.multicall_scan(self.tier_1_danger, "SNIPER", block_number)
+
+        # Build live data for dashboard
+        live_targets_data = []
+
+        for user, hf, coll_usd, debt_usd in results:
+            hf_float = float(hf)
+            live_targets_data.append((user, hf_float, debt_usd, coll_usd))
+
+            if 0 < hf < Decimal('1.0'):
+                logger.info(f"💀 LIQUIDATABLE: {user} (HF: {hf})")
+                await self.execute_liquidation(user)
+
+        elapsed = (time.time() - start_time) * 1000
+        t1_count = len(self.tier_1_danger)
+
+        if t1_count > 0:
+            logger.info(f"🎯 [SNIPER] Block {block_number} | {t1_count} Tier-1 targets in {elapsed:.0f}ms")
+
+        return live_targets_data, elapsed
+
+    # ================================================================
+    # TASK B: THE SCOUT — Tier 2 every 10 blocks, promote to Tier 1
+    # ================================================================
+
+    async def scout_scan(self, block_number):
+        """Process Tier 2 (Watchlist) targets: promote to Tier 1 if HF drops below threshold."""
+        start_time = time.time()
+
+        results = await self.multicall_scan(self.tier_2_watchlist, "SCOUT", block_number)
+
+        promoted = []
+        remaining_t2 = []
+        live_targets_data = []
+
+        for user, hf, coll_usd, debt_usd in results:
+            hf_float = float(hf)
+            live_targets_data.append((user, hf_float, debt_usd, coll_usd))
+
+            if 0 < hf < TIER_1_MAX_HF:
+                # Promote to Tier 1!
+                promoted.append(user)
+                logger.info(f"⬆️ PROMOTED to Tier 1: {user} (HF: {hf:.4f})")
+            elif hf > TIER_2_MAX_HF or hf == 0:
+                # HF recovered above 1.200 or no debt — drop from watchlist
+                pass
+            else:
+                remaining_t2.append(user)
+
+        # Apply promotions to RAM
+        if promoted:
+            self.tier_1_danger.extend(promoted)
+            self.tier_2_watchlist = remaining_t2
+            logger.info(f"📊 Promoted {len(promoted)} targets. Tier 1: {len(self.tier_1_danger)}, Tier 2: {len(self.tier_2_watchlist)}")
+            await self.send_telegram_alert(
+                f"⬆️ <b>{len(promoted)} targets promoted to Tier 1</b>\n"
+                f"🔴 Tier 1: {len(self.tier_1_danger)} | 🟠 Tier 2: {len(self.tier_2_watchlist)}"
+            )
+        else:
+            self.tier_2_watchlist = remaining_t2
+
+        elapsed = (time.time() - start_time) * 1000
+        logger.info(f"🔭 [SCOUT] Block {block_number} | {len(results)} Tier-2 targets in {elapsed:.0f}ms")
+
+        return live_targets_data, elapsed
+
+    # ================================================================
+    # MAIN BLOCK PROCESSOR — Orchestrates Sniper + Scout
+    # ================================================================
+
+    async def process_block(self, block_number):
+        """Process a single new block: run Sniper, optionally run Scout."""
+        start_time = time.time()
+
+        # 1. Update Prices
+        await self.update_prices()
+
+        # 2. Reload targets from disk (non-blocking)
+        await self.load_targets_async()
+
+        total_targets = len(self.tier_1_danger) + len(self.tier_2_watchlist)
+        if total_targets == 0:
+            return
+
+        # 3. TASK A: Sniper — Tier 1 every block
+        sniper_data, sniper_ms = await self.sniper_scan(block_number)
+
+        # 4. TASK B: Scout — Tier 2 every SCOUT_INTERVAL blocks
+        scout_data = []
+        self.blocks_since_scout += 1
+        if self.blocks_since_scout >= SCOUT_INTERVAL:
+            self.blocks_since_scout = 0
+            scout_data_result, scout_ms = await self.scout_scan(block_number)
+            scout_data = scout_data_result
+
+        elapsed = (time.time() - start_time) * 1000
+        logger.info(
+            f"🧱 Block {block_number} | "
+            f"T1: {len(self.tier_1_danger)} | T2: {len(self.tier_2_watchlist)} | "
+            f"{elapsed:.0f}ms"
+        )
+
+        # 5. Async DB push — fire-and-forget (zero main-loop impact)
         if DB_ENABLED:
             try:
+                all_live_data = sniper_data + scout_data
                 asyncio.ensure_future(
-                    asyncio.to_thread(db_manager.update_live_targets, live_targets_data)
+                    asyncio.to_thread(db_manager.update_live_targets, all_live_data)
                 )
                 asyncio.ensure_future(
-                    asyncio.to_thread(db_manager.log_system_metric, block_number, len(self.targets), elapsed)
+                    asyncio.to_thread(db_manager.log_system_metric, block_number, total_targets, elapsed)
                 )
             except Exception as e:
                 logger.warning(f"⚠️ Dashboard DB push failed (non-blocking): {e}")
@@ -586,18 +753,22 @@ class GravityBot:
         await self.rpc.connect()
         await self.init_contracts()
 
-        await self.send_telegram_alert("🟢 <b>Gravity Bot Started (HTTP Polling)</b>")
-        logger.info("🚀 Smart HTTP Polling Engine started.")
+        await self.send_telegram_alert("🟢 <b>Anti-Gravity Bot Started (HTTP Polling)</b>")
+        logger.info("🚀 Anti-Gravity Engine started. Sniper + Scout architecture active.")
 
         # Seed the block tracker
         self.last_processed_block = await self.w3.eth.block_number
         logger.info(f"📍 Starting from block: {self.last_processed_block}")
 
+        # Load initial targets
+        await self.load_targets_async()
+        logger.info(f"📊 Initial targets: Tier 1: {len(self.tier_1_danger)} | Tier 2: {len(self.tier_2_watchlist)}")
+
         # ============================================================
         # SMART POLLING LOOP
         # - Checks for new blocks every POLL_INTERVAL (100ms)
         # - Only processes when a genuinely new block is detected
-        # - Handles RPC failures with reconnect logic
+        # - Handles RPC failures with reconnect logic (429 + 403)
         # ============================================================
         while True:
             try:
@@ -612,8 +783,7 @@ class GravityBot:
                     await asyncio.sleep(POLL_INTERVAL)
 
             except Exception as e:
-                err_str = str(e).lower()
-                if "429" in err_str or "rate" in err_str:
+                if self.rpc.is_rate_limit_error(e):
                     await self.rpc.handle_rate_limit()
                     # Re-init contracts after RPC switch
                     await self.init_contracts()
@@ -627,8 +797,8 @@ class GravityBot:
 
 
 if __name__ == "__main__":
-    bot = GravityBot()
+    bot = AntiGravityBot()
     try:
         asyncio.run(bot.run_forever())
     except KeyboardInterrupt:
-        print("\n🛑 Bot Stopped.")
+        print("\n🛑 Anti-Gravity Bot Stopped.")
