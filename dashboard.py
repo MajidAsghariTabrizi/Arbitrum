@@ -6,6 +6,7 @@ import plotly.graph_objects as go
 import json
 import time
 import os
+import re
 from datetime import datetime
 
 # Try to import st_autorefresh for clean auto-refresh
@@ -27,219 +28,306 @@ st.set_page_config(
 DB_FILE = "mission_control.db"
 
 # =====================================================================
-# CUSTOM CSS — Professional Dark-Mode Quant Trading Dashboard
+# CUSTOM CSS — Professional Dark-Mode Quant Trading UI
 # =====================================================================
 st.markdown("""
     <style>
-        .block-container { padding-top: 1rem; padding-bottom: 1rem; }
+        /* Global spacing */
+        .block-container { padding-top: 0.8rem; padding-bottom: 1rem; }
 
+        /* Metric Cards */
         div[data-testid="stMetricValue"] {
-            font-family: 'JetBrains Mono', 'Courier New', monospace;
-            font-size: 1.6rem;
+            font-family: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
+            font-size: 1.5rem;
+            font-weight: 700;
         }
         div[data-testid="stMetricLabel"] {
-            font-size: 0.85rem;
+            font-size: 0.8rem;
             text-transform: uppercase;
-            letter-spacing: 0.05em;
-            opacity: 0.8;
+            letter-spacing: 0.06em;
+            opacity: 0.75;
         }
 
-        .terminal-log {
-            background-color: #0a0a0a;
-            color: #00ff88;
-            font-family: 'JetBrains Mono', 'Courier New', monospace;
-            padding: 15px;
-            border-radius: 8px;
-            height: 450px;
-            overflow-y: auto;
-            font-size: 11.5px;
-            border: 1px solid #1a1a2e;
-            line-height: 1.6;
-        }
-        .terminal-log .log-error { color: #ff4757; }
-        .terminal-log .log-warning { color: #ffa502; }
-        .terminal-log .log-success { color: #2ed573; }
-        .terminal-log .log-info { color: #70a1ff; }
+        /* KPI Card Highlights */
+        .kpi-danger div[data-testid="stMetricValue"] { color: #ff4757 !important; }
+        .kpi-warning div[data-testid="stMetricValue"] { color: #ffa502 !important; }
+        .kpi-safe div[data-testid="stMetricValue"] { color: #2ed573 !important; }
+        .kpi-info div[data-testid="stMetricValue"] { color: #70a1ff !important; }
 
+        /* Header Bar */
         .header-bar {
-            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
-            padding: 12px 20px;
-            border-radius: 8px;
-            margin-bottom: 1.2rem;
-            color: white;
-            font-size: 1.1rem;
-            font-weight: 600;
-            letter-spacing: 0.02em;
+            background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
+            padding: 14px 24px;
+            border-radius: 10px;
+            margin-bottom: 1rem;
+            color: #f1f2f6;
+            font-size: 1.15rem;
+            font-weight: 700;
+            letter-spacing: 0.03em;
+            border: 1px solid rgba(102, 126, 234, 0.25);
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
         }
 
-        .tier-badge-1 {
+        /* Terminal Log Container */
+        .terminal-log {
+            background-color: #080810;
+            color: #c8d6e5;
+            font-family: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
+            padding: 16px;
+            border-radius: 10px;
+            height: 500px;
+            overflow-y: auto;
+            font-size: 11px;
+            border: 1px solid #1a1a2e;
+            line-height: 1.7;
+            box-shadow: inset 0 2px 8px rgba(0,0,0,0.5);
+        }
+
+        /* Terminal Keyword Highlights */
+        .log-error    { color: #ff4757; font-weight: 600; }
+        .log-warning  { color: #ffa502; }
+        .log-success  { color: #2ed573; font-weight: 600; }
+        .log-info     { color: #70a1ff; }
+        .log-sniper   { color: #00d2d3; font-weight: 700; }
+        .log-scout    { color: #54a0ff; font-weight: 700; }
+        .log-promoted { color: #feca57; font-weight: 700; text-decoration: underline; }
+        .log-preflight{ color: #c56cf0; font-weight: 600; }
+        .log-tx       { color: #ff6348; font-weight: 700; }
+
+        /* Tier Badges */
+        .tier-1-badge {
+            display: inline-block;
             background: linear-gradient(135deg, #ff4757, #c0392b);
             color: white;
-            padding: 3px 10px;
+            padding: 2px 10px;
             border-radius: 12px;
             font-weight: 700;
-            font-size: 0.8rem;
+            font-size: 0.75rem;
+            letter-spacing: 0.04em;
         }
-        .tier-badge-2 {
+        .tier-2-badge {
+            display: inline-block;
             background: linear-gradient(135deg, #ffa502, #e67e22);
             color: white;
-            padding: 3px 10px;
+            padding: 2px 10px;
             border-radius: 12px;
             font-weight: 700;
-            font-size: 0.8rem;
+            font-size: 0.75rem;
+            letter-spacing: 0.04em;
+        }
+
+        /* Tab Styling */
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 4px;
+        }
+        .stTabs [data-baseweb="tab"] {
+            padding: 8px 20px;
+            font-weight: 600;
         }
     </style>
 """, unsafe_allow_html=True)
 
 
 # =====================================================================
-# DATABASE HELPERS
+# DATABASE HELPERS — Thread-safe reads with graceful fallbacks
 # =====================================================================
 
 def get_db_connection():
+    """Thread-safe DB connection with WAL mode."""
     try:
         conn = sqlite3.connect(DB_FILE, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL;")
         return conn
-    except Exception as e:
-        st.error(f"DB Connection Error: {e}")
+    except Exception:
         return None
 
 
-def load_live_targets():
+def safe_query(query, params=None, fallback=None):
+    """Execute a read query with full error handling. Returns pandas DataFrame or fallback."""
     conn = get_db_connection()
-    if conn:
+    if not conn:
+        return fallback if fallback is not None else pd.DataFrame()
+    try:
+        df = pd.read_sql_query(query, conn, params=params)
+        conn.close()
+        return df
+    except Exception:
+        conn.close()
+        return fallback if fallback is not None else pd.DataFrame()
+
+
+def safe_scalar(query, params=None, fallback=0):
+    """Execute a scalar query (returns single value). Falls back gracefully."""
+    conn = get_db_connection()
+    if not conn:
+        return fallback
+    try:
+        cur = conn.cursor()
+        cur.execute(query, params or ())
+        result = cur.fetchone()
+        conn.close()
+        return result[0] if result and result[0] is not None else fallback
+    except Exception:
         try:
-            df = pd.read_sql_query(
-                "SELECT address, health_factor, total_debt_usd, total_collateral_usd, updated_at "
-                "FROM live_targets ORDER BY health_factor ASC",
-                conn
-            )
             conn.close()
-            return df
         except Exception:
-            conn.close()
-    return pd.DataFrame()
+            pass
+        return fallback
+
+
+def load_live_targets():
+    """Load all live targets sorted by HF ascending."""
+    return safe_query(
+        "SELECT address, health_factor, total_debt_usd, total_collateral_usd, updated_at "
+        "FROM live_targets ORDER BY health_factor ASC"
+    )
 
 
 def load_summary():
+    """Load tiered summary KPIs from live_targets."""
     conn = get_db_connection()
-    if conn:
+    if not conn:
+        return {"total_debt": 0, "total_collateral": 0, "danger_count": 0,
+                "watchlist_count": 0, "total_count": 0, "danger_debt": 0, "watchlist_debt": 0}
+    try:
+        cur = conn.cursor()
+        cur.execute('''
+            SELECT
+                COALESCE(SUM(total_debt_usd), 0),
+                COALESCE(SUM(total_collateral_usd), 0),
+                COUNT(CASE WHEN health_factor < 1.05 AND health_factor > 0 THEN 1 END),
+                COUNT(CASE WHEN health_factor >= 1.05 AND health_factor < 1.20 THEN 1 END),
+                COUNT(*),
+                COALESCE(SUM(CASE WHEN health_factor < 1.05 AND health_factor > 0 THEN total_debt_usd ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN health_factor >= 1.05 AND health_factor < 1.20 THEN total_debt_usd ELSE 0 END), 0)
+            FROM live_targets
+        ''')
+        r = cur.fetchone()
+        conn.close()
+        return {
+            "total_debt": r[0], "total_collateral": r[1],
+            "danger_count": r[2], "watchlist_count": r[3],
+            "total_count": r[4], "danger_debt": r[5], "watchlist_debt": r[6]
+        }
+    except Exception:
         try:
-            cur = conn.cursor()
-            cur.execute('''
-                SELECT
-                    COALESCE(SUM(total_debt_usd), 0),
-                    COALESCE(SUM(total_collateral_usd), 0),
-                    COUNT(CASE WHEN health_factor < 1.05 AND health_factor > 0 THEN 1 END),
-                    COUNT(*)
-                FROM live_targets
-            ''')
-            res = cur.fetchone()
             conn.close()
-            return {
-                "total_debt": res[0], "total_collateral": res[1],
-                "danger_count": res[2], "total_count": res[3]
-            }
         except Exception:
-            conn.close()
-    return {"total_debt": 0, "total_collateral": 0, "danger_count": 0, "total_count": 0}
+            pass
+        return {"total_debt": 0, "total_collateral": 0, "danger_count": 0,
+                "watchlist_count": 0, "total_count": 0, "danger_debt": 0, "watchlist_debt": 0}
 
 
 def load_metrics(limit=100):
-    conn = get_db_connection()
-    if conn:
-        try:
-            df = pd.read_sql_query(
-                f"SELECT block_number, target_count, scan_time_ms, timestamp "
-                f"FROM system_metrics ORDER BY id DESC LIMIT {limit}", conn
-            )
-            conn.close()
-            return df
-        except Exception:
-            conn.close()
-    return pd.DataFrame()
+    """Load recent system metrics with tier breakdown."""
+    try:
+        return safe_query(
+            "SELECT block_number, target_count, tier_1_count, tier_2_count, scan_time_ms, timestamp "
+            "FROM system_metrics ORDER BY id DESC LIMIT ?", (limit,)
+        )
+    except Exception:
+        # Fallback if tier columns don't exist
+        return safe_query(
+            "SELECT block_number, target_count, 0 as tier_1_count, 0 as tier_2_count, scan_time_ms, timestamp "
+            "FROM system_metrics ORDER BY id DESC LIMIT ?", (limit,)
+        )
 
 
 def load_avg_scan_time(limit=100):
-    conn = get_db_connection()
-    if conn:
-        try:
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT COALESCE(AVG(scan_time_ms), 0) "
-                "FROM (SELECT scan_time_ms FROM system_metrics ORDER BY id DESC LIMIT ?)",
-                (limit,))
-            res = cur.fetchone()
-            conn.close()
-            return res[0]
-        except Exception:
-            conn.close()
-    return 0.0
+    return safe_scalar(
+        "SELECT COALESCE(AVG(scan_time_ms), 0) "
+        "FROM (SELECT scan_time_ms FROM system_metrics ORDER BY id DESC LIMIT ?)",
+        (limit,), fallback=0.0
+    )
 
 
-def load_logs(limit=100):
-    conn = get_db_connection()
-    if conn:
-        try:
-            df = pd.read_sql_query(
-                f"SELECT timestamp, level, message FROM logs ORDER BY id DESC LIMIT {limit}", conn
-            )
-            conn.close()
-            return df
-        except Exception:
-            conn.close()
-    return pd.DataFrame()
+def load_logs(limit=200):
+    return safe_query(
+        "SELECT timestamp, level, message FROM logs ORDER BY id DESC LIMIT ?", (limit,)
+    )
 
 
 def load_executions(limit=50):
-    conn = get_db_connection()
-    if conn:
-        try:
-            df = pd.read_sql_query(
-                f"SELECT timestamp, tx_hash, user_address, profit_usdc, profit_eth "
-                f"FROM executions ORDER BY id DESC LIMIT {limit}", conn
-            )
-            conn.close()
-            return df
-        except Exception:
-            conn.close()
-    return pd.DataFrame()
+    return safe_query(
+        "SELECT timestamp, tx_hash, user_address, profit_usdc, profit_eth "
+        "FROM executions ORDER BY id DESC LIMIT ?", (limit,)
+    )
 
 
 def load_total_profits():
     conn = get_db_connection()
-    eth, usdc = 0.0, 0.0
-    if conn:
+    if not conn:
+        return 0.0, 0.0
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT COALESCE(SUM(profit_eth), 0), COALESCE(SUM(profit_usdc), 0) FROM executions")
+        r = cur.fetchone()
+        conn.close()
+        return r[0], r[1]
+    except Exception:
         try:
-            cur = conn.cursor()
-            cur.execute("SELECT SUM(profit_eth), SUM(profit_usdc) FROM executions")
-            res = cur.fetchone()
-            if res:
-                eth = res[0] if res[0] else 0.0
-                usdc = res[1] if res[1] else 0.0
             conn.close()
         except Exception:
-            conn.close()
-    return eth, usdc
+            pass
+        return 0.0, 0.0
 
 
 def load_targets_json():
-    """Read structured targets.json for tier visualization."""
+    """
+    Robustly parses the tiered targets.json file.
+    Supports: {"tier_1_danger": [...], "tier_2_watchlist": [...]}
+    Fallback: flat list treated as all Tier 1.
+    Returns: (list, list) — (tier_1, tier_2)
+    """
     paths = ["/root/Arbitrum/targets.json", "targets.json"]
     for path in paths:
         if os.path.exists(path):
             try:
                 with open(path, 'r') as f:
-                    data = json.load(f)
+                    content = f.read().strip()
+                    if not content:
+                        return [], []
+                    data = json.loads(content)
                     if isinstance(data, dict):
                         return data.get("tier_1_danger", []), data.get("tier_2_watchlist", [])
                     elif isinstance(data, list):
                         return data, []  # Legacy flat format
-            except Exception:
+            except (json.JSONDecodeError, IOError):
                 pass
     return [], []
+
+
+# =====================================================================
+# TERMINAL LOG HIGHLIGHTER — Keyword-aware CSS coloring
+# =====================================================================
+
+def highlight_log_line(message, level):
+    """Apply CSS classes based on log level AND Anti-Gravity keywords."""
+    # Escape HTML to prevent injection
+    msg = str(message).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    # Priority keyword highlights (checked first, most specific)
+    if "[SNIPER]" in msg:
+        msg = msg.replace("[SNIPER]", '<span class="log-sniper">[SNIPER]</span>')
+    if "[SCOUT]" in msg:
+        msg = msg.replace("[SCOUT]", '<span class="log-scout">[SCOUT]</span>')
+    if "PROMOTED" in msg.upper():
+        msg = re.sub(r'(PROMOTED)', r'<span class="log-promoted">\1</span>', msg, flags=re.IGNORECASE)
+    if "Pre-flight" in msg or "PRE-FLIGHT" in msg or "Simulation" in msg:
+        msg = re.sub(r'(Pre-flight|PRE-FLIGHT|Simulation|simulate)', r'<span class="log-preflight">\1</span>', msg, flags=re.IGNORECASE)
+    if "TX SENT" in msg or "TX CONFIRMED" in msg:
+        msg = re.sub(r'(TX SENT|TX CONFIRMED|TX REVERTED)', r'<span class="log-tx">\1</span>', msg, flags=re.IGNORECASE)
+
+    # Base level coloring
+    level_lower = str(level).lower()
+    css_map = {
+        'error': 'log-error', 'warning': 'log-warning',
+        'success': 'log-success', 'info': 'log-info'
+    }
+    css_class = css_map.get(level_lower, 'log-info')
+
+    return f'<span class="{css_class}">{msg}</span>'
 
 
 # =====================================================================
@@ -255,7 +343,10 @@ if HAS_AUTOREFRESH:
 # =====================================================================
 
 st.markdown(
-    '<div class="header-bar">🛸 ANTI-GRAVITY — Mission Control Dashboard</div>',
+    '<div class="header-bar">'
+    '🛸 ANTI-GRAVITY — Mission Control &nbsp;|&nbsp; '
+    '<span style="font-size: 0.8rem; opacity: 0.7;">MEV Sniper v2.0 • Arbitrum One</span>'
+    '</div>',
     unsafe_allow_html=True
 )
 
@@ -277,10 +368,10 @@ with st.sidebar:
 
     st.divider()
 
-    # Tier overview from JSON
+    # Tier overview from JSON (file-based, independent of DB)
     t1_json, t2_json = load_targets_json()
-    st.metric("🔴 Tier 1 (JSON)", f"{len(t1_json)}")
-    st.metric("🟠 Tier 2 (JSON)", f"{len(t2_json)}")
+    st.markdown(f'<span class="tier-1-badge">TIER 1</span> &nbsp; **{len(t1_json)}** targets', unsafe_allow_html=True)
+    st.markdown(f'<span class="tier-2-badge">TIER 2</span> &nbsp; **{len(t2_json)}** targets', unsafe_allow_html=True)
 
     st.divider()
 
@@ -293,7 +384,7 @@ with st.sidebar:
 
 
 # =====================================================================
-# TOP KPIs
+# TOP ROW KPIs — 4 columns with color-coded tiers
 # =====================================================================
 
 summary = load_summary()
@@ -302,16 +393,22 @@ avg_scan = load_avg_scan_time()
 kpi1, kpi2, kpi3, kpi4 = st.columns(4)
 
 with kpi1:
-    st.metric("💰 Monitored Debt", f"${summary['total_debt']:,.2f}")
+    st.markdown('<div class="kpi-info">', unsafe_allow_html=True)
+    st.metric("📡 Total Live Targets", f"{summary['total_count']}")
+    st.markdown('</div>', unsafe_allow_html=True)
 with kpi2:
-    st.metric("🏦 Monitored Collateral", f"${summary['total_collateral']:,.2f}")
+    st.markdown('<div class="kpi-danger">', unsafe_allow_html=True)
+    st.metric("🔴 Tier 1 (Danger)", f"{summary['danger_count']}")
+    st.markdown('</div>', unsafe_allow_html=True)
 with kpi3:
-    danger = summary['danger_count']
-    st.metric("⚠️ Users in Danger (HF < 1.05)", f"{danger}",
-              delta=f"-{danger}" if danger > 0 else None,
-              delta_color="inverse" if danger > 0 else "off")
+    st.markdown('<div class="kpi-warning">', unsafe_allow_html=True)
+    st.metric("🟠 Tier 2 (Watchlist)", f"{summary['watchlist_count']}")
+    st.markdown('</div>', unsafe_allow_html=True)
 with kpi4:
-    st.metric("⚡ Avg Scan Speed", f"{avg_scan:.0f} ms")
+    total_risk = summary['danger_debt'] + summary['watchlist_debt']
+    st.markdown('<div class="kpi-danger">', unsafe_allow_html=True)
+    st.metric("💰 Value at Risk", f"${total_risk:,.0f}")
+    st.markdown('</div>', unsafe_allow_html=True)
 
 st.divider()
 
@@ -320,115 +417,296 @@ st.divider()
 # TABS
 # =====================================================================
 
-tab1, tab2, tab3, tab4 = st.tabs([
-    "🎯 Live Targets (Tiered)",
-    "📊 Performance Analytics",
-    "⚔️ Battle Log",
-    "📜 System Terminal"
+tab_radar, tab_danger, tab_watch, tab_exec, tab_term = st.tabs([
+    "📡 Radar",
+    "🔴 Danger Zone",
+    "🟠 Watchlist",
+    "⚔️ Executions",
+    "📜 Live Terminal"
 ])
 
 
-# ─── TAB 1: Live Targets (Tiered) ────────────────────────────────────
+# ─── TAB 1: RADAR SCATTER PLOT ───────────────────────────────────────
 
-with tab1:
-    df_targets = load_live_targets()
+with tab_radar:
+    st.subheader("🎯 Target Radar — Health Factor vs Debt")
 
-    if not df_targets.empty:
-        # Split into tiers based on HF from database
-        df_t1 = df_targets[(df_targets['health_factor'] > 0) & (df_targets['health_factor'] < 1.05)].copy()
-        df_t2 = df_targets[(df_targets['health_factor'] >= 1.05) & (df_targets['health_factor'] < 1.20)].copy()
+    df_all = load_live_targets()
 
-        # --- Tier 1: Danger Zone ---
-        st.markdown("### 🔴 Tier 1 — Danger Zone (HF < 1.05)")
-        t1_col1, t1_col2 = st.columns([1, 2])
+    if not df_all.empty:
+        # Filter to HF range 0 < HF < 1.25 for meaningful visualization
+        df_radar = df_all[
+            (df_all['health_factor'] > 0) & (df_all['health_factor'] < 1.25)
+        ].copy()
 
-        with t1_col1:
-            # HF distribution for Tier 1
-            if not df_t1.empty:
-                fig_t1 = px.histogram(
-                    df_t1, x='health_factor', nbins=25,
+        if not df_radar.empty:
+            # Assign tier labels for coloring
+            df_radar['tier'] = df_radar['health_factor'].apply(
+                lambda hf: '🔴 Tier 1 (Danger)' if hf < 1.05 else '🟠 Tier 2 (Watchlist)'
+            )
+            # Truncated address for tooltips
+            df_radar['short_addr'] = df_radar['address'].apply(
+                lambda a: f"{a[:8]}...{a[-6:]}" if len(str(a)) > 14 else a
+            )
+
+            fig_radar = px.scatter(
+                df_radar,
+                x='health_factor',
+                y='total_debt_usd',
+                color='tier',
+                color_discrete_map={
+                    '🔴 Tier 1 (Danger)': '#ff4757',
+                    '🟠 Tier 2 (Watchlist)': '#ffa502'
+                },
+                size='total_debt_usd',
+                size_max=35,
+                hover_data={
+                    'short_addr': True,
+                    'health_factor': ':.4f',
+                    'total_debt_usd': ':$,.2f',
+                    'total_collateral_usd': ':$,.2f',
+                    'tier': False
+                },
+                labels={
+                    'health_factor': 'Health Factor',
+                    'total_debt_usd': 'Debt (USD)',
+                    'short_addr': 'Address',
+                    'total_collateral_usd': 'Collateral'
+                }
+            )
+
+            # Liquidation threshold line
+            fig_radar.add_vline(
+                x=1.0, line_dash="dash", line_color="#ff4757",
+                line_width=2.5, annotation_text="⚡ LIQUIDATION",
+                annotation_font=dict(color="#ff4757", size=11, family="JetBrains Mono")
+            )
+            # Tier boundary
+            fig_radar.add_vline(
+                x=1.05, line_dash="dot", line_color="#ffa502",
+                line_width=1.5, annotation_text="Tier 1 | Tier 2",
+                annotation_font=dict(color="#ffa502", size=10, family="JetBrains Mono"),
+                annotation_position="top"
+            )
+
+            fig_radar.update_layout(
+                template="plotly_dark",
+                height=520,
+                margin=dict(l=30, r=30, t=50, b=50),
+                xaxis=dict(
+                    title="Health Factor",
+                    range=[0.95, 1.25],
+                    dtick=0.025,
+                    gridcolor='rgba(255,255,255,0.05)'
+                ),
+                yaxis=dict(
+                    title="Debt Size (USD)",
+                    gridcolor='rgba(255,255,255,0.05)'
+                ),
+                font=dict(family="JetBrains Mono, monospace", size=11),
+                legend=dict(
+                    orientation="h", yanchor="bottom", y=1.02,
+                    xanchor="right", x=1,
+                    font=dict(size=12)
+                ),
+                plot_bgcolor='rgba(8,8,16,0.9)',
+                paper_bgcolor='rgba(0,0,0,0)'
+            )
+
+            st.plotly_chart(fig_radar, use_container_width=True)
+
+            # Summary stats below radar
+            rc1, rc2, rc3, rc4 = st.columns(4)
+            liq_count = len(df_radar[df_radar['health_factor'] < 1.0])
+            rc1.metric("Radar Targets", f"{len(df_radar)}")
+            rc2.metric("💀 Liquidatable (HF < 1.0)", f"{liq_count}")
+            rc3.metric("🔴 Danger (HF < 1.05)", f"{len(df_radar[df_radar['health_factor'] < 1.05])}")
+            rc4.metric("🟠 Watchlist (1.05–1.20)", f"{len(df_radar[df_radar['health_factor'] >= 1.05])}")
+        else:
+            st.info("📡 No targets in the HF 0–1.25 visualization range.")
+    else:
+        st.info("🔍 No live target data yet. Waiting for bot to feed Multicall3 results...")
+
+
+# ─── TAB 2: DANGER ZONE (Tier 1) ─────────────────────────────────────
+
+with tab_danger:
+    st.markdown(
+        '### <span class="tier-1-badge">TIER 1</span> &nbsp; Danger Zone — HF < 1.05',
+        unsafe_allow_html=True
+    )
+
+    df_all_targets = load_live_targets()
+
+    if not df_all_targets.empty:
+        df_t1 = df_all_targets[
+            (df_all_targets['health_factor'] > 0) & (df_all_targets['health_factor'] < 1.05)
+        ].copy()
+
+        if not df_t1.empty:
+            d1, d2 = st.columns([1, 2])
+
+            with d1:
+                # HF distribution histogram
+                fig_hist_t1 = px.histogram(
+                    df_t1, x='health_factor', nbins=30,
                     color_discrete_sequence=['#ff4757'],
                     labels={'health_factor': 'Health Factor'}
                 )
-                fig_t1.add_vline(x=1.0, line_dash="dash", line_color="#fff",
-                                line_width=2, annotation_text="Liquidation",
-                                annotation_font=dict(color="#fff", size=10))
-                fig_t1.update_layout(
-                    template="plotly_dark", height=300,
+                fig_hist_t1.add_vline(
+                    x=1.0, line_dash="dash", line_color="#fff",
+                    line_width=2, annotation_text="Liquidation",
+                    annotation_font=dict(color="#fff", size=10)
+                )
+                fig_hist_t1.update_layout(
+                    template="plotly_dark", height=350,
                     margin=dict(l=20, r=20, t=30, b=40),
                     xaxis_title="HF", yaxis_title="# Users",
-                    font=dict(family="JetBrains Mono, monospace")
+                    font=dict(family="JetBrains Mono, monospace", size=10)
                 )
-                st.plotly_chart(fig_t1, use_container_width=True)
-            else:
-                st.info("No Tier 1 targets currently.")
+                st.plotly_chart(fig_hist_t1, use_container_width=True)
 
-        with t1_col2:
-            if not df_t1.empty:
+                # Tier 1 KPIs
+                st.metric("🔴 Tier 1 Total Debt", f"${df_t1['total_debt_usd'].sum():,.0f}")
+                st.metric("💀 Liquidatable (HF < 1.0)", f"{len(df_t1[df_t1['health_factor'] < 1.0])}")
+
+            with d2:
                 disp = df_t1.copy()
                 disp.columns = ['Address', 'HF', 'Debt (USD)', 'Collateral (USD)', 'Updated']
                 disp['Debt (USD)'] = disp['Debt (USD)'].apply(lambda x: f"${x:,.2f}")
                 disp['Collateral (USD)'] = disp['Collateral (USD)'].apply(lambda x: f"${x:,.2f}")
                 disp['HF'] = disp['HF'].apply(lambda x: f"{x:.4f}")
-                disp['Address'] = disp['Address'].apply(lambda x: f"{x[:6]}...{x[-4:]}" if len(str(x)) > 10 else x)
-                st.dataframe(disp, use_container_width=True, hide_index=True, height=300)
-            else:
-                st.info("No Tier 1 targets in database.")
+                disp['Address'] = disp['Address'].apply(
+                    lambda x: f"{x[:8]}...{x[-6:]}" if len(str(x)) > 14 else x
+                )
+                st.dataframe(disp, use_container_width=True, hide_index=True, height=380)
+        else:
+            st.success("✅ No targets in the danger zone. All positions are safe.")
+    else:
+        st.info("🔍 No live target data available.")
 
-        st.divider()
 
-        # --- Tier 2: Watchlist ---
-        st.markdown("### 🟠 Tier 2 — Watchlist (HF 1.05 – 1.20)")
-        t2_col1, t2_col2 = st.columns([1, 2])
+# ─── TAB 3: WATCHLIST (Tier 2) ───────────────────────────────────────
 
-        with t2_col1:
-            if not df_t2.empty:
-                fig_t2 = px.histogram(
-                    df_t2, x='health_factor', nbins=25,
+with tab_watch:
+    st.markdown(
+        '### <span class="tier-2-badge">TIER 2</span> &nbsp; Watchlist — HF 1.05 – 1.20',
+        unsafe_allow_html=True
+    )
+
+    df_all_w = load_live_targets()
+
+    if not df_all_w.empty:
+        df_t2 = df_all_w[
+            (df_all_w['health_factor'] >= 1.05) & (df_all_w['health_factor'] < 1.20)
+        ].copy()
+
+        if not df_t2.empty:
+            w1, w2 = st.columns([1, 2])
+
+            with w1:
+                fig_hist_t2 = px.histogram(
+                    df_t2, x='health_factor', nbins=30,
                     color_discrete_sequence=['#ffa502'],
                     labels={'health_factor': 'Health Factor'}
                 )
-                fig_t2.add_vline(x=1.05, line_dash="dot", line_color="#fff",
-                                line_width=1.5, annotation_text="Tier 1 Threshold",
-                                annotation_font=dict(color="#fff", size=10))
-                fig_t2.update_layout(
-                    template="plotly_dark", height=300,
+                fig_hist_t2.add_vline(
+                    x=1.05, line_dash="dot", line_color="#fff",
+                    line_width=1.5, annotation_text="Tier 1 Boundary",
+                    annotation_font=dict(color="#fff", size=10)
+                )
+                fig_hist_t2.update_layout(
+                    template="plotly_dark", height=350,
                     margin=dict(l=20, r=20, t=30, b=40),
                     xaxis_title="HF", yaxis_title="# Users",
-                    font=dict(family="JetBrains Mono, monospace")
+                    font=dict(family="JetBrains Mono, monospace", size=10)
                 )
-                st.plotly_chart(fig_t2, use_container_width=True)
-            else:
-                st.info("No Tier 2 targets currently.")
+                st.plotly_chart(fig_hist_t2, use_container_width=True)
 
-        with t2_col2:
-            if not df_t2.empty:
+                st.metric("🟠 Tier 2 Total Debt", f"${df_t2['total_debt_usd'].sum():,.0f}")
+                st.metric("Watchlist Size", f"{len(df_t2)} targets")
+
+            with w2:
                 disp2 = df_t2.copy()
                 disp2.columns = ['Address', 'HF', 'Debt (USD)', 'Collateral (USD)', 'Updated']
                 disp2['Debt (USD)'] = disp2['Debt (USD)'].apply(lambda x: f"${x:,.2f}")
                 disp2['Collateral (USD)'] = disp2['Collateral (USD)'].apply(lambda x: f"${x:,.2f}")
                 disp2['HF'] = disp2['HF'].apply(lambda x: f"{x:.4f}")
-                disp2['Address'] = disp2['Address'].apply(lambda x: f"{x[:6]}...{x[-4:]}" if len(str(x)) > 10 else x)
-                st.dataframe(disp2, use_container_width=True, hide_index=True, height=300)
-            else:
-                st.info("No Tier 2 targets in database.")
-
-        # Summary row
-        st.divider()
-        c1, c2, c3, c4 = st.columns(4)
-        liq_count = len(df_targets[(df_targets['health_factor'] > 0) & (df_targets['health_factor'] < 1.0)])
-        c1.metric("Total Monitored", f"{len(df_targets)}")
-        c2.metric("🔴 Tier 1 (Danger)", f"{len(df_t1)}")
-        c3.metric("🟠 Tier 2 (Watchlist)", f"{len(df_t2)}")
-        c4.metric("💀 Liquidatable (HF < 1.0)", f"{liq_count}")
+                disp2['Address'] = disp2['Address'].apply(
+                    lambda x: f"{x[:8]}...{x[-6:]}" if len(str(x)) > 14 else x
+                )
+                st.dataframe(disp2, use_container_width=True, hide_index=True, height=380)
+        else:
+            st.info("📋 No targets on the watchlist currently.")
     else:
-        st.info("🔍 No live target data yet. Waiting for bot to feed Multicall3 results...")
+        st.info("🔍 No live target data available.")
 
 
-# ─── TAB 2: Performance Analytics ────────────────────────────────────
+# ─── TAB 4: EXECUTIONS ───────────────────────────────────────────────
 
-with tab2:
-    st.subheader("RPC & Scan Performance")
+with tab_exec:
+    st.subheader("⚔️ Liquidation History")
+
+    df_exec = load_executions()
+    if not df_exec.empty:
+        pnl1, pnl2, pnl3 = st.columns(3)
+        total_eth, total_usdc = load_total_profits()
+        pnl1.metric("Total Liquidations", f"{len(df_exec)}")
+        pnl2.metric("Profit (USDC)", f"${total_usdc:,.2f}")
+        pnl3.metric("Profit (ETH)", f"Ξ {total_eth:.4f}")
+        st.divider()
+        st.dataframe(
+            df_exec, use_container_width=True, hide_index=True,
+            column_config={
+                "tx_hash": st.column_config.TextColumn("TX Hash", width="medium"),
+                "user_address": st.column_config.TextColumn("Target", width="medium"),
+                "profit_usdc": st.column_config.NumberColumn("Profit (USDC)", format="$%.2f"),
+                "profit_eth": st.column_config.NumberColumn("Profit (ETH)", format="Ξ%.6f"),
+            }
+        )
+    else:
+        st.info("🏹 No liquidations recorded yet. The sniper is watching...")
+
+
+# ─── TAB 5: LIVE TERMINAL ────────────────────────────────────────────
+
+with tab_term:
+    st.subheader("📡 Live System Terminal")
+    st.caption("Keyword highlights: "
+               '<span class="log-sniper">[SNIPER]</span> · '
+               '<span class="log-scout">[SCOUT]</span> · '
+               '<span class="log-promoted">PROMOTED</span> · '
+               '<span class="log-preflight">Pre-flight</span> · '
+               '<span class="log-tx">TX SENT</span>',
+               unsafe_allow_html=True)
+
+    df_logs = load_logs(300)
+
+    if not df_logs.empty:
+        log_lines = []
+        for _, row in df_logs.iterrows():
+            ts = row['timestamp']
+            level = row['level']
+            msg = row['message']
+
+            # Build highlighted line
+            highlighted_msg = highlight_log_line(msg, level)
+            line = f'<span style="opacity:0.5">[{ts}]</span> {highlighted_msg}'
+            log_lines.append(line)
+
+        st.markdown(
+            f'<div class="terminal-log">{"<br>".join(log_lines)}</div>',
+            unsafe_allow_html=True
+        )
+    else:
+        st.info("📜 No system logs yet. Logs appear once the bot starts processing blocks.")
+
+
+# =====================================================================
+# PERFORMANCE ANALYTICS (Below Tabs)
+# =====================================================================
+
+with st.expander("📊 Scan Performance Analytics", expanded=False):
     df_metrics = load_metrics(100)
 
     if not df_metrics.empty:
@@ -444,92 +722,53 @@ with tab2:
                 y=df_metrics['scan_time_ms'],
                 mode='lines+markers',
                 line=dict(color='#667eea', width=2),
-                marker=dict(size=4, color='#764ba2'),
-                fill='tozeroy', fillcolor='rgba(102, 126, 234, 0.1)',
+                marker=dict(size=3, color='#764ba2'),
+                fill='tozeroy', fillcolor='rgba(102, 126, 234, 0.08)',
                 name='Scan Time'
             ))
             fig_line.update_layout(
-                template="plotly_dark", height=350,
-                margin=dict(l=20, r=20, t=30, b=40),
+                template="plotly_dark", height=320,
+                margin=dict(l=20, r=20, t=20, b=40),
                 xaxis_title="Block", yaxis_title="ms",
-                font=dict(family="JetBrains Mono, monospace"),
+                font=dict(family="JetBrains Mono, monospace", size=10),
                 showlegend=False
             )
             st.plotly_chart(fig_line, use_container_width=True)
 
         with perf_col2:
-            st.markdown("##### Targets Scanned per Block")
-            fig_bar = px.bar(
-                df_metrics, x=df_metrics['block_number'].astype(str),
-                y='target_count', color_discrete_sequence=['#2ed573'],
-                labels={'target_count': '# Targets', 'x': 'Block'}
-            )
-            fig_bar.update_layout(
-                template="plotly_dark", height=350,
-                margin=dict(l=20, r=20, t=30, b=40),
+            st.markdown("##### Tier Breakdown per Block")
+            fig_tier = go.Figure()
+            fig_tier.add_trace(go.Bar(
+                x=df_metrics['block_number'].astype(str),
+                y=df_metrics['tier_1_count'],
+                name='Tier 1', marker_color='#ff4757'
+            ))
+            fig_tier.add_trace(go.Bar(
+                x=df_metrics['block_number'].astype(str),
+                y=df_metrics['tier_2_count'],
+                name='Tier 2', marker_color='#ffa502'
+            ))
+            fig_tier.update_layout(
+                template="plotly_dark", height=320,
+                margin=dict(l=20, r=20, t=20, b=40),
                 xaxis_title="Block", yaxis_title="Count",
-                font=dict(family="JetBrains Mono, monospace"),
-                showlegend=False
+                font=dict(family="JetBrains Mono, monospace", size=10),
+                barmode='stack',
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
             )
-            st.plotly_chart(fig_bar, use_container_width=True)
+            st.plotly_chart(fig_tier, use_container_width=True)
 
         s1, s2, s3, s4 = st.columns(4)
         s1.metric("Avg (ms)", f"{df_metrics['scan_time_ms'].mean():.0f}")
         s2.metric("Min (ms)", f"{df_metrics['scan_time_ms'].min():.0f}")
         s3.metric("Max (ms)", f"{df_metrics['scan_time_ms'].max():.0f}")
-        s4.metric("Blocks", f"{len(df_metrics)}")
+        s4.metric("Blocks Tracked", f"{len(df_metrics)}")
     else:
         st.info("📊 No scan metrics yet. Data appears once the bot processes blocks.")
 
 
-# ─── TAB 3: Battle Log ───────────────────────────────────────────────
-
-with tab3:
-    st.subheader("⚔️ Liquidation History")
-    df_exec = load_executions()
-    if not df_exec.empty:
-        pnl1, pnl2, pnl3 = st.columns(3)
-        total_eth, total_usdc = load_total_profits()
-        pnl1.metric("Total Liquidations", f"{len(df_exec)}")
-        pnl2.metric("Profit (USDC)", f"${total_usdc:,.2f}")
-        pnl3.metric("Profit (ETH)", f"Ξ {total_eth:.4f}")
-        st.divider()
-        st.dataframe(df_exec, use_container_width=True, hide_index=True,
-                     column_config={
-                         "tx_hash": st.column_config.TextColumn("TX Hash", width="medium"),
-                         "user_address": st.column_config.TextColumn("Target", width="medium"),
-                         "profit_usdc": st.column_config.NumberColumn("Profit (USDC)", format="$%.2f"),
-                         "profit_eth": st.column_config.NumberColumn("Profit (ETH)", format="Ξ%.6f"),
-                     })
-    else:
-        st.info("🏹 No liquidations recorded yet.")
-
-
-# ─── TAB 4: System Terminal ──────────────────────────────────────────
-
-with tab4:
-    st.subheader("📡 Live System Logs")
-    df_logs = load_logs(200)
-
-    if not df_logs.empty:
-        log_lines = []
-        for _, row in df_logs.iterrows():
-            level = str(row['level']).lower()
-            css_map = {'error': 'log-error', 'warning': 'log-warning', 'success': 'log-success'}
-            css_class = css_map.get(level, 'log-info')
-            line = f'<span class="{css_class}">[{row["timestamp"]}] [{row["level"]}] {row["message"]}</span>'
-            log_lines.append(line)
-
-        st.markdown(
-            f'<div class="terminal-log">{"<br>".join(log_lines)}</div>',
-            unsafe_allow_html=True
-        )
-    else:
-        st.info("📜 No system logs available yet.")
-
-
 # =====================================================================
-# FALLBACK AUTO-REFRESH
+# FALLBACK AUTO-REFRESH (if streamlit-autorefresh not installed)
 # =====================================================================
 if not HAS_AUTOREFRESH:
     time.sleep(5)

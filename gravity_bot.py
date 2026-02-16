@@ -741,8 +741,14 @@ class AntiGravityBot:
                 asyncio.ensure_future(
                     asyncio.to_thread(db_manager.update_live_targets, all_live_data)
                 )
+                t1_count = len(self.tier_1_danger)
+                t2_count = len(self.tier_2_watchlist)
                 asyncio.ensure_future(
-                    asyncio.to_thread(db_manager.log_system_metric, block_number, total_targets, elapsed)
+                    asyncio.to_thread(
+                        db_manager.log_system_metric,
+                        block_number, total_targets, elapsed,
+                        tier_1_count=t1_count, tier_2_count=t2_count
+                    )
                 )
             except Exception as e:
                 logger.warning(f"⚠️ Dashboard DB push failed (non-blocking): {e}")
