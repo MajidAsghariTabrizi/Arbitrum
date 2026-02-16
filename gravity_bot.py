@@ -3,6 +3,7 @@ import json
 import asyncio
 import logging
 import time
+import random
 import warnings
 from decimal import Decimal
 import aiofiles
@@ -54,7 +55,7 @@ POLL_INTERVAL = 0.1         # 100ms — check for new blocks rapidly
 
 # Concurrency Config — max parallel RPC calls for health checks
 # Safe for free RPCs: 8 concurrent requests balances speed vs. rate limits
-SCAN_SEMAPHORE_LIMIT = 8
+SCAN_SEMAPHORE_LIMIT = 5
 
 # Arbitrum One Addresses (EIP-55 Checksummed)
 POOL_ADDRESS = AsyncWeb3.to_checksum_address("0x794a61358D6845594F94dc1DB02A252b5b4814aD")
@@ -158,7 +159,18 @@ class AsyncRPCManager:
         self.w3 = None
 
     async def connect(self):
-        """Connect to the current RPC endpoint."""
+        """Connect to the current RPC endpoint. Closes any existing session first."""
+        # Gracefully close the previous aiohttp session to prevent
+        # "Unclosed client session" warnings and memory leaks
+        if self.w3 and hasattr(self.w3.provider, '_request_kwargs'):
+            try:
+                session = await self.w3.provider.cache_async_session(None)
+                if session and not session.closed:
+                    await session.close()
+                    logger.info("🔒 Previous aiohttp session closed cleanly.")
+            except Exception:
+                pass  # Best-effort cleanup — don't block reconnection
+
         url = self.endpoints[self.current_index]
         logger.info(f"🔌 Connecting to RPC: {url[:40]}...")
         self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(url))
@@ -491,12 +503,15 @@ class GravityBot:
             )
 
     async def check_user_health(self, user):
-        """Semaphore-gated health check for a single user.
+        """Semaphore-gated health check with jitter for WAF evasion.
         
-        The semaphore limits concurrent RPC calls to SCAN_SEMAPHORE_LIMIT,
-        preventing rate-limit errors while allowing parallel scanning.
+        The semaphore limits concurrent RPC calls to SCAN_SEMAPHORE_LIMIT.
+        The random micro-sleep (10-100ms) staggers requests so they look
+        like organic traffic rather than a bot burst to free RPC WAFs.
         """
         async with self.scan_semaphore:
+            # Jitter: stagger requests by 10-100ms to defeat burst detection
+            await asyncio.sleep(random.uniform(0.01, 0.1))
             try:
                 data = await self.pool.functions.getUserAccountData(user).call()
                 hf = Decimal(data[5]) / Decimal(10**18)
