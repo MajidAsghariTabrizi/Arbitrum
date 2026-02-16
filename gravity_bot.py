@@ -51,7 +51,10 @@ if not PRIVATE_KEY or not LIQUIDATOR_ADDRESS:
 
 # Polling Config
 POLL_INTERVAL = 0.1         # 100ms — check for new blocks rapidly
-HEALTH_CHECK_DELAY = 0.2    # 200ms between each sequential health check
+
+# Concurrency Config — max parallel RPC calls for health checks
+# Safe for free RPCs: 8 concurrent requests balances speed vs. rate limits
+SCAN_SEMAPHORE_LIMIT = 8
 
 # Arbitrum One Addresses (EIP-55 Checksummed)
 POOL_ADDRESS = AsyncWeb3.to_checksum_address("0x794a61358D6845594F94dc1DB02A252b5b4814aD")
@@ -205,6 +208,7 @@ class GravityBot:
 
         # Concurrency
         self.nonce_lock = asyncio.Lock()
+        self.scan_semaphore = asyncio.Semaphore(SCAN_SEMAPHORE_LIMIT)
         self._last_errors = {}
 
     @property
@@ -363,10 +367,23 @@ class GravityBot:
 
         logger.info(f"⚔️ SNIPING: {user} | Debt: ${debt_val:.2f}")
 
+        # ==============================================================
+        # SMART SLIPPAGE — Calculate dynamic amount_out_min
+        # The flash loan borrows `debt_amount` of `debt_asset`, liquidates
+        # the user, seizes collateral, and swaps collateral → debt_asset
+        # to repay. `amount_out_min` protects the swap output.
+        #
+        # Formula: min_output = debt_amount * 0.98 (2% slippage tolerance)
+        # This ensures we receive at least 98% of what we need to repay.
+        # ==============================================================
+        SLIPPAGE_TOLERANCE = Decimal('0.98')  # 2% max slippage
+        amount_out_min = int(Decimal(debt_amount) * SLIPPAGE_TOLERANCE)
+
         # Params
         fee = 3000          # 0.3% Uniswap fee tier
-        amount_out_min = 0  # TODO: Slippage calc
         sqrt_price_limit = 0
+
+        logger.info(f"📊 Slippage Guard: amount_out_min={amount_out_min} (2% tolerance)")
 
         # Build TX Function
         tx_func = self.liquidator_contract.functions.requestFlashLoan(
@@ -382,35 +399,53 @@ class GravityBot:
         try:
             # ============================================================
             # NONCE LOCK — prevents "nonce too low" when multiple targets
-            # are liquidatable in the same block
+            # are liquidatable in the same block.
+            # Uses 'pending' to account for in-flight transactions.
+            # try/finally ensures clean error handling inside the lock.
             # ============================================================
             async with self.nonce_lock:
-                nonce = await self.w3.eth.get_transaction_count(self.account.address)
-
-                # Gas Estimation (with safe fallback)
                 try:
-                    gas_est = await tx_func.estimate_gas({'from': self.account.address})
-                    gas_limit = int(gas_est * 1.2)
-                except Exception:
-                    gas_limit = 2500000  # Safe fallback for flash loans
+                    nonce = await self.w3.eth.get_transaction_count(
+                        self.account.address, 'pending'
+                    )
 
-                # EIP-1559 Fees
-                block = await self.w3.eth.get_block('latest')
-                base_fee = block['baseFeePerGas']
-                priority = self.w3.to_wei(0.5, 'gwei')
-                max_fee = base_fee + priority
+                    # Gas Estimation (with safe fallback)
+                    try:
+                        gas_est = await tx_func.estimate_gas({'from': self.account.address})
+                        gas_limit = int(gas_est * 1.2)
+                    except Exception as gas_err:
+                        logger.warning(f"⚠️ Gas estimation failed, using fallback: {gas_err}")
+                        gas_limit = 2500000  # Safe fallback for flash loans
 
-                tx = await tx_func.build_transaction({
-                    'from': self.account.address,
-                    'nonce': nonce,
-                    'maxFeePerGas': max_fee,
-                    'maxPriorityFeePerGas': priority,
-                    'gas': gas_limit,
-                    'chainId': 42161
-                })
+                    # EIP-1559 Fees
+                    block = await self.w3.eth.get_block('latest')
+                    base_fee = block['baseFeePerGas']
+                    priority = self.w3.to_wei(0.5, 'gwei')
+                    max_fee = base_fee + priority
 
-                signed = self.account.sign_transaction(tx)
-                tx_hash = await self.w3.eth.send_raw_transaction(signed.raw_transaction)
+                    tx = await tx_func.build_transaction({
+                        'from': self.account.address,
+                        'nonce': nonce,
+                        'maxFeePerGas': max_fee,
+                        'maxPriorityFeePerGas': priority,
+                        'gas': gas_limit,
+                        'chainId': 42161
+                    })
+
+                    signed = self.account.sign_transaction(tx)
+                    tx_hash = await self.w3.eth.send_raw_transaction(signed.raw_transaction)
+
+                except Exception as build_err:
+                    # Log clearly if build/sign/send fails inside the lock
+                    await self.log_system(
+                        f"TX Build/Send Failed for {user}: {build_err}", "error"
+                    )
+                    await self.send_telegram_alert(
+                        f"⚠️ <b>TX Build Failed</b> for <code>{user}</code>:\n"
+                        f"<code>{build_err}</code>",
+                        is_error=True
+                    )
+                    return  # Exit cleanly — lock is released by `async with`
 
             # --- Post-send logging (outside lock to release nonce ASAP) ---
             tx_hex = tx_hash.hex()
@@ -456,21 +491,26 @@ class GravityBot:
             )
 
     async def check_user_health(self, user):
-        """Sequential health check for a single user."""
-        try:
-            data = await self.pool.functions.getUserAccountData(user).call()
-            hf = Decimal(data[5]) / Decimal(10**18)
+        """Semaphore-gated health check for a single user.
+        
+        The semaphore limits concurrent RPC calls to SCAN_SEMAPHORE_LIMIT,
+        preventing rate-limit errors while allowing parallel scanning.
+        """
+        async with self.scan_semaphore:
+            try:
+                data = await self.pool.functions.getUserAccountData(user).call()
+                hf = Decimal(data[5]) / Decimal(10**18)
 
-            if hf < 1.0 and hf > 0:
-                logger.info(f"💀 LIQUIDATABLE: {user} (HF: {hf})")
-                await self.execute_liquidation(user)
-        except Exception as e:
-            err_str = str(e).lower()
-            if "429" in err_str or "rate" in err_str:
-                await self.rpc.handle_rate_limit()
+                if hf < 1.0 and hf > 0:
+                    logger.info(f"💀 LIQUIDATABLE: {user} (HF: {hf})")
+                    await self.execute_liquidation(user)
+            except Exception as e:
+                err_str = str(e).lower()
+                if "429" in err_str or "rate" in err_str:
+                    await self.rpc.handle_rate_limit()
 
     async def process_block(self, block_number):
-        """Process a single new block: update prices, check all targets sequentially."""
+        """Process a single new block: update prices, check all targets concurrently."""
         start_time = time.time()
 
         # 1. Update Prices
@@ -481,10 +521,12 @@ class GravityBot:
         if not self.targets:
             return
 
-        # 3. Sequential Health Checks with throttle
-        for user in self.targets:
-            await self.check_user_health(user)
-            await asyncio.sleep(HEALTH_CHECK_DELAY)
+        # 3. Concurrent Health Checks — gated by scan_semaphore
+        # asyncio.gather fires all tasks; semaphore limits to SCAN_SEMAPHORE_LIMIT
+        # concurrent RPC calls at any time. return_exceptions=True prevents one
+        # failed check from cancelling all others.
+        tasks = [self.check_user_health(user) for user in self.targets]
+        await asyncio.gather(*tasks, return_exceptions=True)
 
         elapsed = (time.time() - start_time) * 1000
         logger.info(f"🧱 Block {block_number} scanned. {len(self.targets)} targets in {elapsed:.0f}ms")
