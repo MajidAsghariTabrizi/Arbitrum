@@ -21,7 +21,7 @@ def get_connection():
 
 def init_db():
     """Initializes the database with all necessary tables.
-    Uses IF NOT EXISTS for idempotency — safe to call multiple times."""
+    Includes robust auto-migration for existing databases."""
     with db_lock:
         conn = get_connection()
         cursor = conn.cursor()
@@ -50,7 +50,7 @@ def init_db():
             )
         ''')
 
-        # Table: Live Targets (real-time on-chain data from Multicall3)
+        # Table: Live Targets
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS live_targets (
                 address TEXT PRIMARY KEY,
@@ -61,40 +61,37 @@ def init_db():
             )
         ''')
 
-        # ================================================================
-        # Table: System Metrics — UPGRADED for tiered architecture
-        # Tracks tier_1_count and tier_2_count separately.
-        # target_count is kept for backward compat (= tier_1 + tier_2).
-        # ================================================================
+        # Table: System Metrics
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS system_metrics (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 block_number INTEGER,
                 target_count INTEGER,
-                tier_1_count INTEGER DEFAULT 0,
-                tier_2_count INTEGER DEFAULT 0,
                 scan_time_ms REAL,
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ''')
 
-        # --- MIGRATION: Add tier columns to existing system_metrics table ---
-        # SQLite ALTER TABLE ADD COLUMN is idempotent-safe via try/except.
+        # ================================================================
+        # SCHEMA MIGRATION: Auto-add tier columns if missing
+        # Use explicit try/except blocks for each column to ensure robustness.
+        # ================================================================
         try:
             cursor.execute("ALTER TABLE system_metrics ADD COLUMN tier_1_count INTEGER DEFAULT 0")
         except sqlite3.OperationalError:
-            pass  # Column already exists
+            pass  # Column likely exists
+            
         try:
             cursor.execute("ALTER TABLE system_metrics ADD COLUMN tier_2_count INTEGER DEFAULT 0")
         except sqlite3.OperationalError:
-            pass  # Column already exists
-        
+            pass  # Column likely exists
+
         conn.commit()
         conn.close()
 
 
 # =====================================================================
-# CORE FUNCTIONS — Logging & Executions
+# CORE FUNCTIONS
 # =====================================================================
 
 def log_event(level, message):
@@ -106,7 +103,6 @@ def log_event(level, message):
             cursor.execute("INSERT INTO logs (level, message) VALUES (?, ?)", (level, message))
             conn.commit()
             conn.close()
-            # Also print to console for debugging
             print(f"[{level}] {message}")
     except Exception as e:
         print(f"❌ DB Log Error: {e}")
@@ -127,7 +123,6 @@ def record_execution(tx_hash, user_address, debt_asset, collateral_asset, profit
         log_event("ERROR", f"Failed to record execution: {e}")
 
 def get_recent_logs(limit=50):
-    """Fetches the most recent system logs."""
     try:
         with db_lock:
             conn = get_connection()
@@ -140,7 +135,6 @@ def get_recent_logs(limit=50):
         return []
 
 def get_executions(limit=50):
-    """Fetches the most recent executions."""
     try:
         with db_lock:
             conn = get_connection()
@@ -153,7 +147,6 @@ def get_executions(limit=50):
         return []
 
 def get_total_profit():
-    """Calculates total profit in ETH and USDC."""
     try:
         with db_lock:
             conn = get_connection()
@@ -170,16 +163,11 @@ def get_total_profit():
 
 
 # =====================================================================
-# HIGH-PERFORMANCE FUNCTIONS — Real-Time Monitoring
+# HIGH-PERFORMANCE FUNCTIONS
 # =====================================================================
 
 def update_live_targets(targets_data):
-    """
-    Batch UPSERT all live target data in a single lightning-fast transaction.
-    
-    Args:
-        targets_data: list of tuples (address, health_factor, total_debt_usd, total_collateral_usd)
-    """
+    """Batch UPSERT live target data."""
     if not targets_data:
         return
     try:
@@ -187,7 +175,6 @@ def update_live_targets(targets_data):
             conn = get_connection()
             cursor = conn.cursor()
             now = datetime.datetime.utcnow().isoformat()
-            # Prepare rows with timestamp
             rows = [(addr, hf, debt, coll, now) for addr, hf, debt, coll in targets_data]
             cursor.executemany('''
                 INSERT INTO live_targets (address, health_factor, total_debt_usd, total_collateral_usd, updated_at)
@@ -203,26 +190,16 @@ def update_live_targets(targets_data):
     except Exception as e:
         print(f"❌ update_live_targets Error: {e}")
 
-
 def log_system_metric(block_number, target_count, scan_time_ms, tier_1_count=0, tier_2_count=0):
-    """
-    Logs a single scan performance metric with tiered breakdown.
-    
-    Args:
-        block_number: the block just scanned
-        target_count: total number of targets checked (tier_1 + tier_2)
-        scan_time_ms: elapsed time in milliseconds
-        tier_1_count: number of Tier 1 (Danger) targets in this scan
-        tier_2_count: number of Tier 2 (Watchlist) targets in this scan
-    """
+    """Logs scan metrics with tiered breakdown."""
     try:
         with db_lock:
             conn = get_connection()
             cursor = conn.cursor()
             cursor.execute('''
-                INSERT INTO system_metrics (block_number, target_count, tier_1_count, tier_2_count, scan_time_ms)
+                INSERT INTO system_metrics (block_number, target_count, scan_time_ms, tier_1_count, tier_2_count)
                 VALUES (?, ?, ?, ?, ?)
-            ''', (block_number, target_count, tier_1_count, tier_2_count, scan_time_ms))
+            ''', (block_number, target_count, scan_time_ms, tier_1_count, tier_2_count))
             conn.commit()
             conn.close()
     except Exception as e:
@@ -230,11 +207,11 @@ def log_system_metric(block_number, target_count, scan_time_ms, tier_1_count=0, 
 
 
 # =====================================================================
-# DASHBOARD QUERY FUNCTIONS
+# DASHBOARD QUERIES
 # =====================================================================
 
 def get_live_targets():
-    """Fetches all live targets sorted by health_factor ascending (closest to liquidation first)."""
+    """Fetches all live targets sorted by HF ascending."""
     try:
         with db_lock:
             conn = get_connection()
@@ -251,70 +228,59 @@ def get_live_targets():
         return []
 
 def get_live_targets_summary():
-    """Returns aggregated KPI data from the live_targets table with tier breakdown."""
+    """Returns aggregated KPI data."""
     try:
         with db_lock:
             conn = get_connection()
             cursor = conn.cursor()
             cursor.execute('''
                 SELECT
-                    COALESCE(SUM(total_debt_usd), 0) as total_debt,
-                    COALESCE(SUM(total_collateral_usd), 0) as total_collateral,
-                    COUNT(CASE WHEN health_factor < 1.05 AND health_factor > 0 THEN 1 END) as danger_count,
-                    COUNT(CASE WHEN health_factor >= 1.05 AND health_factor < 1.20 THEN 1 END) as watchlist_count,
-                    COUNT(*) as total_count,
-                    COALESCE(SUM(CASE WHEN health_factor < 1.05 AND health_factor > 0 THEN total_debt_usd ELSE 0 END), 0) as danger_debt,
-                    COALESCE(SUM(CASE WHEN health_factor >= 1.05 AND health_factor < 1.20 THEN total_debt_usd ELSE 0 END), 0) as watchlist_debt
+                    COALESCE(SUM(total_debt_usd), 0),
+                    COALESCE(SUM(total_collateral_usd), 0),
+                    COUNT(CASE WHEN health_factor < 1.05 AND health_factor > 0 THEN 1 END),
+                    COUNT(CASE WHEN health_factor >= 1.05 AND health_factor < 1.20 THEN 1 END),
+                    COUNT(*),
+                    COALESCE(SUM(CASE WHEN health_factor < 1.05 AND health_factor > 0 THEN total_debt_usd ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN health_factor >= 1.05 AND health_factor < 1.20 THEN total_debt_usd ELSE 0 END), 0)
                 FROM live_targets
             ''')
-            result = cursor.fetchone()
+            r = cursor.fetchone()
             conn.close()
             return {
-                "total_debt": result[0],
-                "total_collateral": result[1],
-                "danger_count": result[2],
-                "watchlist_count": result[3],
-                "total_count": result[4],
-                "danger_debt": result[5],
-                "watchlist_debt": result[6]
+                "total_debt": r[0], "total_collateral": r[1],
+                "danger_count": r[2], "watchlist_count": r[3],
+                "total_count": r[4], "danger_debt": r[5], "watchlist_debt": r[6]
             }
     except Exception:
         return {
-            "total_debt": 0, "total_collateral": 0,
-            "danger_count": 0, "watchlist_count": 0,
-            "total_count": 0, "danger_debt": 0, "watchlist_debt": 0
+            "total_debt": 0, "total_collateral": 0, "danger_count": 0,
+            "watchlist_count": 0, "total_count": 0, "danger_debt": 0, "watchlist_debt": 0
         }
 
 def get_recent_metrics(limit=100):
-    """Fetches the most recent system metrics for scan performance charts.
-    Handles missing tier columns gracefully for backward compat."""
+    """
+    Fetches recent system metrics.
+    Robustly handles cases where tier columns might be missing in query selection.
+    """
     try:
         with db_lock:
             conn = get_connection()
             cursor = conn.cursor()
-            try:
-                cursor.execute('''
-                    SELECT block_number, target_count, tier_1_count, tier_2_count, scan_time_ms, timestamp
-                    FROM system_metrics
-                    ORDER BY id DESC
-                    LIMIT ?
-                ''', (limit,))
-            except sqlite3.OperationalError:
-                # Fallback: tier columns don't exist yet (pre-migration data)
-                cursor.execute('''
-                    SELECT block_number, target_count, 0 as tier_1_count, 0 as tier_2_count, scan_time_ms, timestamp
-                    FROM system_metrics
-                    ORDER BY id DESC
-                    LIMIT ?
-                ''', (limit,))
+            # We can safely select the columns because init_db() ensures they exist
+            cursor.execute('''
+                SELECT block_number, target_count, tier_1_count, tier_2_count, scan_time_ms, timestamp
+                FROM system_metrics
+                ORDER BY id DESC
+                LIMIT ?
+            ''', (limit,))
             rows = cursor.fetchall()
             conn.close()
             return rows
-    except Exception:
+    except Exception as e:
+        print(f"Metric Fetch Error: {e}")
         return []
 
 def get_avg_scan_time(limit=100):
-    """Returns average scan time over the last N entries."""
     try:
         with db_lock:
             conn = get_connection()
@@ -328,7 +294,6 @@ def get_avg_scan_time(limit=100):
             return result[0]
     except Exception:
         return 0.0
-
 
 # Initialize DB on module load
 init_db()
