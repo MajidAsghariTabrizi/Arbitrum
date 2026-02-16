@@ -4,3 +4,6 @@ requests>=2.31.0
 streamlit
 pandas
 aiofiles
+plotly
+streamlit-autorefresh
+eth-abi

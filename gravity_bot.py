@@ -534,7 +534,9 @@ class GravityBot:
                 logger.error(f"❌ Multicall failed on block {block_number}: {e}")
             return
 
-        # 4. Decode results and check for liquidatable positions
+        # 4. Decode results, extract live data, and check for liquidatable positions
+        live_targets_data = []  # For dashboard DB push
+
         for i, raw_bytes in enumerate(return_data):
             user = self.targets[i]
             try:
@@ -542,7 +544,19 @@ class GravityBot:
                     ['uint256', 'uint256', 'uint256', 'uint256', 'uint256', 'uint256'],
                     raw_bytes
                 )
+
+                # --- Extract USD values for monitoring dashboard ---
+                # Aave V3 getUserAccountData returns:
+                #   [0] totalCollateralBase  (USD, 8 decimals)
+                #   [1] totalDebtBase        (USD, 8 decimals)
+                #   [5] healthFactor         (18 decimals)
+                total_collateral_usd = float(Decimal(decoded_data[0]) / Decimal(10**8))
+                total_debt_usd = float(Decimal(decoded_data[1]) / Decimal(10**8))
                 hf = Decimal(decoded_data[5]) / Decimal(10**18)
+                hf_float = float(hf)
+
+                # Collect for async DB push
+                live_targets_data.append((user, hf_float, total_debt_usd, total_collateral_usd))
 
                 if 0 < hf < Decimal('1.0'):
                     logger.info(f"💀 LIQUIDATABLE: {user} (HF: {hf})")
@@ -553,6 +567,18 @@ class GravityBot:
 
         elapsed = (time.time() - start_time) * 1000
         logger.info(f"🧱 Block {block_number} scanned. {len(self.targets)} targets in {elapsed:.0f}ms")
+
+        # 5. Async DB push — fire-and-forget via asyncio.to_thread (zero main-loop impact)
+        if DB_ENABLED:
+            try:
+                asyncio.ensure_future(
+                    asyncio.to_thread(db_manager.update_live_targets, live_targets_data)
+                )
+                asyncio.ensure_future(
+                    asyncio.to_thread(db_manager.log_system_metric, block_number, len(self.targets), elapsed)
+                )
+            except Exception as e:
+                logger.warning(f"⚠️ Dashboard DB push failed (non-blocking): {e}")
 
     async def run_forever(self):
         """Main Smart HTTP Polling Loop — tracks new blocks and processes them."""
