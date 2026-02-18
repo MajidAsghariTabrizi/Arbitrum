@@ -141,6 +141,11 @@ TOKENS: Dict[str, dict] = {
     "PENDLE": {"address": "0x0c880f6761F1af8d9Aa9C466984785263cf79560", "decimals": 18},
     "GMX":    {"address": "0xfc5A1A6EB076a2C7AD06EDb220f4daaC9AF172af", "decimals": 18},
     "RDNT":   {"address": "0x3082CC23568eA640225c2467653dB90e9250AaA0", "decimals": 18},
+    "AIDOGE": {"address": "0x09E18590E8f76b6Cf471b3cd75fE1A1a9D2B2c2b", "decimals": 18},
+    "XAI":    {"address": "0x4cb9a7ae498cedcbb5eae9f25736ae7d428c9d66", "decimals": 18},
+    "JOE":    {"address": "0x371c7ec6D8039ff7933a2AA28EB827Ffe1F52f07", "decimals": 18},
+    "GNS":    {"address": "0x18c11FD286C5EC11c3b683Caa813B77f5163A122", "decimals": 18},
+    "VRTX":   {"address": "0x95146881b86B3ee99e63705eC87AfE29Fcc0Baa4", "decimals": 18},
 }
 
 # Base quote token
@@ -333,7 +338,7 @@ ARB_CONTRACT_ABI = [
 # CONSTANTS
 # ═══════════════════════════════════════════════════════════════════════════════
 AAVE_FLASHLOAN_FEE_BPS = 5        # 0.05% = 5 basis points
-MIN_PROFIT_USD = 5.00              # $5 minimum — accounts for gas spikes + slippage drift
+MIN_PROFIT_USD = 1.00              # $1 minimum — accounts for gas spikes + slippage drift
 MAX_GAS_PRICE_GWEI = 1.0          # Arbitrum gas is cheap, but cap it
 SCAN_COOLDOWN_SECONDS = 0.5       # Minimum time between scans
 MAX_SLIPPAGE_BPS = 50             # 0.5% max slippage for trade sizing
