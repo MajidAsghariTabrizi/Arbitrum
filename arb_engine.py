@@ -339,6 +339,7 @@ SCAN_COOLDOWN_SECONDS = 0.5       # Minimum time between scans
 MAX_SLIPPAGE_BPS = 50             # 0.5% max slippage for trade sizing
 SAFETY_MARGIN_MULTIPLIER = 1.5    # Extra margin on cost estimates to avoid NotProfitable
 LEG_A_SLIPPAGE_BPS = 50           # 0.5% slippage tolerance on Leg A output
+MULTICALL_CHUNK_SIZE = 15         # Max calls per tryAggregate to avoid gas limits
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ROUTE CONFIDENCE — Tracks simulation failures per route
@@ -768,13 +769,27 @@ async def scan_and_execute(rpc_manager: AsyncRPCManager, block_number: int, eth_
                 leg_a_calls.append((target, calldata))
                 leg_a_map.append((symbol, dex_name, fee, dex_config["type"]))
 
+    # Execute Leg A Batch (Chunked to prevent Out of Gas)
     if not leg_a_calls:
         return 0
 
-    # Execute Leg A Batch
     try:
-        # tryAggregate(requireSuccess=False, calls=...)
-        leg_a_results = await multicall.functions.tryAggregate(False, leg_a_calls).call()
+        # Split into chunks of 15
+        chunks = [leg_a_calls[i : i + MULTICALL_CHUNK_SIZE] for i in range(0, len(leg_a_calls), MULTICALL_CHUNK_SIZE)]
+        
+        # Create concurrent tasks for each chunk
+        tasks = []
+        for chunk in chunks:
+            tasks.append(
+                multicall.functions.tryAggregate(False, chunk).call({'gas': 50_000_000})
+            )
+            
+        # Fire all chunks
+        chunk_results = await asyncio.gather(*tasks)
+        
+        # Flatten results
+        leg_a_results = [item for sublist in chunk_results for item in sublist]
+
     except Exception as e:
         logger.error(f"❌ Leg A Multicall failed: {e}")
         await rpc_manager.handle_rate_limit()
@@ -844,9 +859,23 @@ async def scan_and_execute(rpc_manager: AsyncRPCManager, block_number: int, eth_
     if not leg_b_calls:
         return 0
 
-    # Execute Leg B Batch
+    # Execute Leg B Batch (Chunked)
     try:
-        leg_b_results = await multicall.functions.tryAggregate(False, leg_b_calls).call()
+        # Split into chunks
+        chunks_b = [leg_b_calls[i : i + MULTICALL_CHUNK_SIZE] for i in range(0, len(leg_b_calls), MULTICALL_CHUNK_SIZE)]
+        
+        # Concurrent execution
+        tasks_b = []
+        for chunk in chunks_b:
+            tasks_b.append(
+                multicall.functions.tryAggregate(False, chunk).call({'gas': 50_000_000})
+            )
+            
+        chunk_results_b = await asyncio.gather(*tasks_b)
+        
+        # Flatten
+        leg_b_results = [item for sublist in chunk_results_b for item in sublist]
+
     except Exception as e:
         logger.warning(f"⚠️ Leg B Multicall failed: {e}")
         return 0
