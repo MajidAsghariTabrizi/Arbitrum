@@ -98,6 +98,39 @@ def send_telegram_alert(msg: str):
         pass
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# MULTICALL3 CONFIGURATION (Arbitrum One)
+# ═══════════════════════════════════════════════════════════════════════════════
+MULTICALL3_ADDRESS = "0xcA11bde05977b3631167028862bE2a173976CA11"
+MULTICALL3_ABI = [
+    {
+        "inputs": [
+            {"name": "requireSuccess", "type": "bool"},
+            {
+                "components": [
+                    {"name": "target", "type": "address"},
+                    {"name": "callData", "type": "bytes"}
+                ],
+                "name": "calls",
+                "type": "tuple[]"
+            }
+        ],
+        "name": "tryAggregate",
+        "outputs": [
+            {
+                "components": [
+                    {"name": "success", "type": "bool"},
+                    {"name": "returnData", "type": "bytes"}
+                ],
+                "name": "returnData",
+                "type": "tuple[]"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    }
+]
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # TOKEN CONFIGURATION — Arbitrum Mainnet (Real Addresses)
 # ═══════════════════════════════════════════════════════════════════════════════
 TOKENS: Dict[str, dict] = {
@@ -677,7 +710,7 @@ async def get_eth_price(rpc_manager: AsyncRPCManager) -> float:
     """Get ETH price in USD via Multicall (1 call)."""
     try:
         w3 = await rpc_manager.get_w3()
-        multicall = w3.eth.contract(address=MULTICALL3_ADDRESS, abi=MULTICALL3_ABI)
+        multicall = w3.eth.contract(address=w3.to_checksum_address(MULTICALL3_ADDRESS), abi=MULTICALL3_ABI)
         
         # Quote 1 WETH → USDC on UniV3 0.05%
         target, data = _encode_quoter_call(
@@ -709,7 +742,7 @@ async def scan_and_execute(rpc_manager: AsyncRPCManager, block_number: int, eth_
     spreads_found = 0
     now = time.time()
     w3 = await rpc_manager.get_w3()
-    multicall = w3.eth.contract(address=MULTICALL3_ADDRESS, abi=MULTICALL3_ABI)
+    multicall = w3.eth.contract(address=w3.to_checksum_address(MULTICALL3_ADDRESS), abi=MULTICALL3_ABI)
     
     # ════════════════════════════════════════════════════════════════════════════
     # STEP 1: BATCH LEG A (USDC → TOKEN)
