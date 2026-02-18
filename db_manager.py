@@ -1,7 +1,21 @@
+"""
+═══════════════════════════════════════════════════════════════════════════════
+🛸 ANTI-GRAVITY — Database Manager (SQLite)
+═══════════════════════════════════════════════════════════════════════════════
+Central database handler for all Anti-Gravity business lines:
+  • Liquidation Bot (gravity_bot.py) — executions, logs, targets, metrics
+  • DEX Arbitrage Engine (arb_engine.py) — arb_executions, arb_spreads
+
+Uses WAL mode for high-frequency concurrent reads/writes.
+All tables use CREATE TABLE IF NOT EXISTS for safe auto-migration.
+═══════════════════════════════════════════════════════════════════════════════
+"""
+
 import sqlite3
 import datetime
 import os
 import threading
+import json
 
 # Configuration
 DB_FILE = "mission_control.db"
@@ -9,15 +23,15 @@ DB_FILE = "mission_control.db"
 # Thread-safe lock for database access
 db_lock = threading.Lock()
 
+
 def get_connection():
     """Returns a connection to the SQLite database with WAL mode for high-frequency writes."""
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    # WAL mode: allows concurrent reads while writing — prevents DB locking
     conn.execute("PRAGMA journal_mode=WAL;")
-    # NORMAL sync: balanced durability/speed — safe for non-financial writes
     conn.execute("PRAGMA synchronous=NORMAL;")
     return conn
+
 
 def init_db():
     """Initializes the database with all necessary tables.
@@ -25,7 +39,11 @@ def init_db():
     with db_lock:
         conn = get_connection()
         cursor = conn.cursor()
-        
+
+        # ═════════════════════════════════════════════════════════════
+        # LIQUIDATION BOT TABLES
+        # ═════════════════════════════════════════════════════════════
+
         # Table: Executions (Liquidation Events)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS executions (
@@ -72,19 +90,47 @@ def init_db():
             )
         ''')
 
-        # ================================================================
-        # SCHEMA MIGRATION: Auto-add tier columns if missing
-        # Use explicit try/except blocks for each column to ensure robustness.
-        # ================================================================
+        # ═════════════════════════════════════════════════════════════
+        # DEX ARBITRAGE TABLES
+        # ═════════════════════════════════════════════════════════════
+
+        # Table: Arb Executions (Successful Arbitrage Trades)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS arb_executions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tx_hash TEXT,
+                token_pair TEXT,
+                dex_a TEXT,
+                dex_b TEXT,
+                profit_usd REAL,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        # Table: Arb Spreads (Live Spread Monitoring for Charts)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS arb_spreads (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token_pair TEXT,
+                dex_a TEXT,
+                dex_b TEXT,
+                spread_percent REAL,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        # ═════════════════════════════════════════════════════════════
+        # SCHEMA MIGRATION: Auto-add columns if missing
+        # ═════════════════════════════════════════════════════════════
         try:
             cursor.execute("ALTER TABLE system_metrics ADD COLUMN tier_1_count INTEGER DEFAULT 0")
         except sqlite3.OperationalError:
-            pass  # Column likely exists
-            
+            pass  # Column already exists
+
         try:
             cursor.execute("ALTER TABLE system_metrics ADD COLUMN tier_2_count INTEGER DEFAULT 0")
         except sqlite3.OperationalError:
-            pass  # Column likely exists
+            pass  # Column already exists
 
         conn.commit()
         conn.close()
@@ -107,6 +153,7 @@ def log_event(level, message):
     except Exception as e:
         print(f"❌ DB Log Error: {e}")
 
+
 def record_execution(tx_hash, user_address, debt_asset, collateral_asset, profit_eth, profit_usdc):
     """Records a successful liquidation event."""
     try:
@@ -122,6 +169,7 @@ def record_execution(tx_hash, user_address, debt_asset, collateral_asset, profit
     except Exception as e:
         log_event("ERROR", f"Failed to record execution: {e}")
 
+
 def get_recent_logs(limit=50):
     try:
         with db_lock:
@@ -134,6 +182,7 @@ def get_recent_logs(limit=50):
     except Exception:
         return []
 
+
 def get_executions(limit=50):
     try:
         with db_lock:
@@ -145,6 +194,7 @@ def get_executions(limit=50):
             return rows
     except Exception:
         return []
+
 
 def get_total_profit():
     try:
@@ -190,6 +240,7 @@ def update_live_targets(targets_data):
     except Exception as e:
         print(f"❌ update_live_targets Error: {e}")
 
+
 def log_system_metric(block_number, target_count, scan_time_ms, tier_1_count=0, tier_2_count=0):
     """Logs scan metrics with tiered breakdown."""
     try:
@@ -227,6 +278,7 @@ def get_live_targets():
     except Exception:
         return []
 
+
 def get_live_targets_summary():
     """Returns aggregated KPI data."""
     try:
@@ -257,6 +309,7 @@ def get_live_targets_summary():
             "watchlist_count": 0, "total_count": 0, "danger_debt": 0, "watchlist_debt": 0
         }
 
+
 def get_recent_metrics(limit=100):
     """
     Fetches recent system metrics.
@@ -266,7 +319,6 @@ def get_recent_metrics(limit=100):
         with db_lock:
             conn = get_connection()
             cursor = conn.cursor()
-            # We can safely select the columns because init_db() ensures they exist
             cursor.execute('''
                 SELECT block_number, target_count, tier_1_count, tier_2_count, scan_time_ms, timestamp
                 FROM system_metrics
@@ -279,6 +331,7 @@ def get_recent_metrics(limit=100):
     except Exception as e:
         print(f"Metric Fetch Error: {e}")
         return []
+
 
 def get_avg_scan_time(limit=100):
     try:
@@ -294,6 +347,123 @@ def get_avg_scan_time(limit=100):
             return result[0]
     except Exception:
         return 0.0
+
+
+# =====================================================================
+# ARBITRAGE FUNCTIONS
+# =====================================================================
+
+def record_arb_execution(tx_hash, token_pair, dex_a, dex_b, profit_usd):
+    """Records a successful arbitrage execution."""
+    try:
+        with db_lock:
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO arb_executions (tx_hash, token_pair, dex_a, dex_b, profit_usd)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (tx_hash, token_pair, dex_a, dex_b, profit_usd))
+            conn.commit()
+            conn.close()
+    except Exception as e:
+        print(f"❌ record_arb_execution Error: {e}")
+
+
+def log_arb_spread(token_pair, dex_a, dex_b, spread_percent):
+    """Logs a spread opportunity (for live chart)."""
+    try:
+        with db_lock:
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO arb_spreads (token_pair, dex_a, dex_b, spread_percent)
+                VALUES (?, ?, ?, ?)
+            ''', (token_pair, dex_a, dex_b, spread_percent))
+            conn.commit()
+            conn.close()
+    except Exception as e:
+        print(f"❌ log_arb_spread Error: {e}")
+
+
+def get_recent_arb_executions(limit=50):
+    """Fetches recent successful arbitrage executions."""
+    try:
+        with db_lock:
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id, tx_hash, token_pair, dex_a, dex_b, profit_usd, timestamp "
+                "FROM arb_executions ORDER BY id DESC LIMIT ?", (limit,)
+            )
+            rows = cursor.fetchall()
+            conn.close()
+            return rows
+    except Exception:
+        return []
+
+
+def get_recent_spreads(limit=200):
+    """Fetches recent spreads for the live chart."""
+    try:
+        with db_lock:
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id, token_pair, dex_a, dex_b, spread_percent, timestamp "
+                "FROM arb_spreads ORDER BY id DESC LIMIT ?", (limit,)
+            )
+            rows = cursor.fetchall()
+            conn.close()
+            return rows
+    except Exception:
+        return []
+
+
+def get_total_arb_profit():
+    """Returns total arbitrage profit in USD."""
+    try:
+        with db_lock:
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT COALESCE(SUM(profit_usd), 0) FROM arb_executions")
+            result = cursor.fetchone()
+            conn.close()
+            return result[0] if result[0] else 0.0
+    except Exception:
+        return 0.0
+
+
+def get_arb_execution_count():
+    """Returns total number of successful arb executions."""
+    try:
+        with db_lock:
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM arb_executions")
+            result = cursor.fetchone()
+            conn.close()
+            return result[0] if result[0] else 0
+    except Exception:
+        return 0
+
+
+def get_active_spreads_count(minutes=60):
+    """Returns count of unique spreads found in the last N minutes."""
+    try:
+        with db_lock:
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT COUNT(*)
+                FROM arb_spreads
+                WHERE timestamp >= datetime('now', ? || ' minutes')
+            ''', (f"-{minutes}",))
+            result = cursor.fetchone()
+            conn.close()
+            return result[0] if result[0] else 0
+    except Exception:
+        return 0
+
 
 # Initialize DB on module load
 init_db()

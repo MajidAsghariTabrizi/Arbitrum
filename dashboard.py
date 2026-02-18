@@ -1,3 +1,19 @@
+"""
+═══════════════════════════════════════════════════════════════════════════════
+🛸 ANTI-GRAVITY — Mission Control Dashboard (Streamlit)
+═══════════════════════════════════════════════════════════════════════════════
+Unified dashboard for all Anti-Gravity business lines:
+  Tab 1: 📡 Radar          — Health Factor vs Debt scatter plot
+  Tab 2: 🔴 Danger Zone    — Tier 1 targets (HF < 1.05)
+  Tab 3: 🟠 Watchlist      — Tier 2 targets (1.05 ≤ HF < 1.20)
+  Tab 4: ⚔️ Executions     — Liquidation history
+  Tab 5: 🔄 DEX Arbitrage  — Spread monitoring, live charts, arb executions
+  Tab 6: 📜 Live Terminal  — System log viewer
+
+Uses width="stretch" for Streamlit dataframes (deprecation-safe).
+═══════════════════════════════════════════════════════════════════════════════
+"""
+
 import streamlit as st
 import pandas as pd
 import sqlite3
@@ -53,6 +69,8 @@ st.markdown("""
         .kpi-warning div[data-testid="stMetricValue"] { color: #ffa502 !important; }
         .kpi-safe div[data-testid="stMetricValue"] { color: #2ed573 !important; }
         .kpi-info div[data-testid="stMetricValue"] { color: #70a1ff !important; }
+        .kpi-profit div[data-testid="stMetricValue"] { color: #7bed9f !important; }
+        .kpi-arb div[data-testid="stMetricValue"] { color: #1e90ff !important; }
 
         /* Header Bar */
         .header-bar {
@@ -115,6 +133,16 @@ st.markdown("""
             font-size: 0.75rem;
             letter-spacing: 0.04em;
         }
+        .arb-badge {
+            display: inline-block;
+            background: linear-gradient(135deg, #1e90ff, #0052cc);
+            color: white;
+            padding: 2px 10px;
+            border-radius: 12px;
+            font-weight: 700;
+            font-size: 0.75rem;
+            letter-spacing: 0.04em;
+        }
     </style>
 """, unsafe_allow_html=True)
 
@@ -131,7 +159,6 @@ def normalize_dataframe(df):
     if df.empty:
         return pd.DataFrame(columns=['Address', 'Health Factor', 'Debt (USD)', 'Collateral (USD)', 'Updated'])
 
-    # Map varied keys to standard names
     rename_map = {
         'address': 'Address',
         'health_factor': 'Health Factor',
@@ -146,7 +173,6 @@ def normalize_dataframe(df):
     }
     df = df.rename(columns=rename_map)
 
-    # Ensure numeric types
     if 'Health Factor' in df.columns:
         df['Health Factor'] = pd.to_numeric(df['Health Factor'], errors='coerce')
     if 'Debt (USD)' in df.columns:
@@ -166,6 +192,7 @@ def get_db_connection():
     except Exception:
         return None
 
+
 def safe_query(query, params=None):
     conn = get_db_connection()
     if not conn:
@@ -178,6 +205,7 @@ def safe_query(query, params=None):
         conn.close()
         return pd.DataFrame()
 
+
 def load_live_targets():
     df = safe_query(
         "SELECT address, health_factor, total_debt_usd, total_collateral_usd, updated_at "
@@ -185,9 +213,11 @@ def load_live_targets():
     )
     return normalize_dataframe(df)
 
+
 def load_summary():
     conn = get_db_connection()
-    if not conn: return {}
+    if not conn:
+        return {}
     try:
         cur = conn.cursor()
         cur.execute('''
@@ -211,27 +241,35 @@ def load_summary():
     except Exception:
         return {}
 
+
 def load_metrics(limit=100):
     try:
         return safe_query(
             "SELECT block_number, target_count, tier_1_count, tier_2_count, scan_time_ms, timestamp "
             "FROM system_metrics ORDER BY id DESC LIMIT ?", (limit,)
         )
-    except:
+    except Exception:
         return safe_query(
             "SELECT block_number, target_count, 0 as tier_1_count, 0 as tier_2_count, scan_time_ms, timestamp "
             "FROM system_metrics ORDER BY id DESC LIMIT ?", (limit,)
         )
 
+
 def load_logs(limit=200):
     return safe_query("SELECT timestamp, level, message FROM logs ORDER BY id DESC LIMIT ?", (limit,))
 
+
 def load_executions(limit=50):
-    return safe_query("SELECT timestamp, tx_hash, user_address, profit_usdc, profit_eth FROM executions ORDER BY id DESC LIMIT ?", (limit,))
+    return safe_query(
+        "SELECT timestamp, tx_hash, user_address, profit_usdc, profit_eth "
+        "FROM executions ORDER BY id DESC LIMIT ?", (limit,)
+    )
+
 
 def load_total_profits():
     conn = get_db_connection()
-    if not conn: return 0.0, 0.0
+    if not conn:
+        return 0.0, 0.0
     try:
         cur = conn.cursor()
         cur.execute("SELECT COALESCE(SUM(profit_eth), 0), COALESCE(SUM(profit_usdc), 0) FROM executions")
@@ -241,28 +279,28 @@ def load_total_profits():
     except Exception:
         return 0.0, 0.0
 
+
 def load_targets_json():
-    # Robust loading for sidebar counts from file (backup to DB)
     paths = ["/root/Arbitrum/targets.json", "targets.json"]
     for path in paths:
         if os.path.exists(path):
             try:
                 with open(path, 'r') as f:
                     content = f.read().strip()
-                    if not content: return [], []
+                    if not content:
+                        return [], []
                     data = json.loads(content)
                     if isinstance(data, dict):
                         return data.get("tier_1_danger", []), data.get("tier_2_watchlist", [])
                     elif isinstance(data, list):
                         return data, []
-            except: pass
+            except Exception:
+                pass
     return [], []
 
+
 def load_logs_fallback(limit=100):
-    """
-    Reads actual log files if DB logs are empty or out of sync.
-    Searches common PM2 log paths.
-    """
+    """Reads actual log files if DB logs are empty."""
     log_paths = [
         os.path.expanduser("~/.pm2/logs/ArbitrumBot-out.log"),
         os.path.expanduser("~/.pm2/logs/ArbitrumBot-error.log"),
@@ -273,21 +311,87 @@ def load_logs_fallback(limit=100):
         if os.path.exists(path):
             try:
                 with open(path, 'r', errors='ignore') as f:
-                    # simplistic reading of last N lines
                     all_lines = f.readlines()
                     lines.extend(all_lines[-limit:])
-            except: continue
-    
-    # Process lines into structure
+            except Exception:
+                continue
+
     processed = []
     for line in lines[-limit:]:
-        # basic timestamp extraction if possible, or just raw
         processed.append({
-            'timestamp': datetime.now().strftime('%H:%M:%S'), # approximate
+            'timestamp': datetime.now().strftime('%H:%M:%S'),
             'level': 'INFO',
             'message': line.strip()
         })
     return pd.DataFrame(processed) if processed else pd.DataFrame()
+
+
+# =====================================================================
+# ARBITRAGE DATA LOADERS
+# =====================================================================
+
+def load_arb_executions(limit=50):
+    """Load recent arbitrage executions for the data grid."""
+    return safe_query(
+        "SELECT timestamp, tx_hash, token_pair, dex_a, dex_b, profit_usd "
+        "FROM arb_executions ORDER BY id DESC LIMIT ?", (limit,)
+    )
+
+
+def load_arb_spreads(limit=300):
+    """Load recent spreads for the live chart."""
+    return safe_query(
+        "SELECT token_pair, dex_a, dex_b, spread_percent, timestamp "
+        "FROM arb_spreads ORDER BY id DESC LIMIT ?", (limit,)
+    )
+
+
+def load_arb_total_profit():
+    """Load total arb profit in USD."""
+    conn = get_db_connection()
+    if not conn:
+        return 0.0
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT COALESCE(SUM(profit_usd), 0) FROM arb_executions")
+        r = cur.fetchone()
+        conn.close()
+        return r[0] if r[0] else 0.0
+    except Exception:
+        return 0.0
+
+
+def load_arb_execution_count():
+    """Total arb executions."""
+    conn = get_db_connection()
+    if not conn:
+        return 0
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM arb_executions")
+        r = cur.fetchone()
+        conn.close()
+        return r[0] if r[0] else 0
+    except Exception:
+        return 0
+
+
+def load_active_spreads_count(minutes=60):
+    """Count of spreads found in the last N minutes."""
+    conn = get_db_connection()
+    if not conn:
+        return 0
+    try:
+        cur = conn.cursor()
+        cur.execute('''
+            SELECT COUNT(*) FROM arb_spreads
+            WHERE timestamp >= datetime('now', ? || ' minutes')
+        ''', (f"-{minutes}",))
+        r = cur.fetchone()
+        conn.close()
+        return r[0] if r[0] else 0
+    except Exception:
+        return 0
 
 
 # =====================================================================
@@ -296,8 +400,7 @@ def load_logs_fallback(limit=100):
 
 def highlight_log_line(message, level):
     msg = str(message).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    
-    # Anti-Gravity Keywords
+
     if "[SNIPER]" in msg:
         msg = msg.replace("[SNIPER]", '<span class="log-sniper">[SNIPER]</span>')
     if "[SCOUT]" in msg:
@@ -328,7 +431,7 @@ if HAS_AUTOREFRESH:
 st.markdown(
     '<div class="header-bar">'
     '🛸 ANTI-GRAVITY — Mission Control &nbsp;|&nbsp; '
-    '<span style="font-size: 0.8rem; opacity: 0.7;">MEV Sniper v2.0 • Arbitrum One</span>'
+    '<span style="font-size: 0.8rem; opacity: 0.7;">MEV Platform v2.0 • Liquidations + DEX Arb • Arbitrum One</span>'
     '</div>',
     unsafe_allow_html=True
 )
@@ -339,11 +442,14 @@ with st.sidebar:
     st.divider()
     st.metric("System Status", "ONLINE", delta="Active", delta_color="normal")
     total_eth, total_usdc = load_total_profits()
-    st.metric("Total Profit (USDC)", f"${total_usdc:,.2f}")
+    st.metric("Liquidation Profit (USDC)", f"${total_usdc:,.2f}")
+    arb_profit = load_arb_total_profit()
+    st.metric("Arb Profit (USD)", f"${arb_profit:,.2f}")
     st.divider()
     t1_json, t2_json = load_targets_json()
     st.markdown(f'<span class="tier-1-badge">TIER 1</span> &nbsp; **{len(t1_json)}** targets', unsafe_allow_html=True)
     st.markdown(f'<span class="tier-2-badge">TIER 2</span> &nbsp; **{len(t2_json)}** targets', unsafe_allow_html=True)
+    st.markdown(f'<span class="arb-badge">ARB ENGINE</span> &nbsp; **{load_arb_execution_count()}** trades', unsafe_allow_html=True)
     st.divider()
     if st.button("🔄 Refresh Data", use_container_width=True):
         st.rerun()
@@ -371,20 +477,19 @@ with k4:
 
 st.divider()
 
-# Tabs
-tab_radar, tab_danger, tab_watch, tab_exec, tab_term = st.tabs([
-    "📡 Radar", "🔴 Danger Zone", "🟠 Watchlist", "⚔️ Executions", "📜 Live Terminal"
+# ── TABS ──
+tab_radar, tab_danger, tab_watch, tab_exec, tab_arb, tab_term = st.tabs([
+    "📡 Radar", "🔴 Danger Zone", "🟠 Watchlist", "⚔️ Executions", "🔄 DEX Arbitrage", "📜 Live Terminal"
 ])
 
 # ─── RADAR ────────────────────────────────
 with tab_radar:
     st.subheader("🎯 Target Radar — Health Factor vs Debt")
-    df_all = load_live_targets() # Normalized
+    df_all = load_live_targets()
 
     if not df_all.empty and 'Health Factor' in df_all.columns:
-        # Filter range
         df_radar = df_all[(df_all['Health Factor'] > 0) & (df_all['Health Factor'] < 1.25)].copy()
-        
+
         if not df_radar.empty:
             df_radar['Tier'] = df_radar['Health Factor'].apply(
                 lambda hf: '🔴 Tier 1 (Danger)' if hf < 1.05 else '🟠 Tier 2 (Watchlist)'
@@ -401,7 +506,7 @@ with tab_radar:
                 hover_data=['Short Address', 'Collateral (USD)'],
                 labels={'Health Factor': 'HF'}
             )
-            
+
             fig.add_vline(x=1.0, line_dash="dash", line_color="#ff4757", annotation_text="LIQUIDATION")
             fig.update_layout(
                 template="plotly_dark", height=500,
@@ -425,16 +530,17 @@ with tab_danger:
             c1, c2 = st.columns([1, 2])
             with c1:
                 fig = px.histogram(df_t1, x='Health Factor', nbins=20, color_discrete_sequence=['#ff4757'])
-                fig.update_layout(template="plotly_dark", height=350, margin=dict(l=20,r=20,t=20,b=20))
+                fig.update_layout(template="plotly_dark", height=350, margin=dict(l=20, r=20, t=20, b=20))
                 st.plotly_chart(fig, use_container_width=True)
             with c2:
                 st.dataframe(
-                    df_t1, height=350, use_container_width=True, hide_index=True,
+                    df_t1, height=350, hide_index=True,
                     column_config={
                         "Debt (USD)": st.column_config.NumberColumn(format="$%.2f"),
                         "Collateral (USD)": st.column_config.NumberColumn(format="$%.2f"),
                         "Health Factor": st.column_config.NumberColumn(format="%.4f"),
-                    }
+                    },
+                    use_container_width=True,
                 )
         else:
             st.success("✅ No Tier 1 targets.")
@@ -450,16 +556,17 @@ with tab_watch:
             c1, c2 = st.columns([1, 2])
             with c1:
                 fig = px.histogram(df_t2, x='Health Factor', nbins=20, color_discrete_sequence=['#ffa502'])
-                fig.update_layout(template="plotly_dark", height=350, margin=dict(l=20,r=20,t=20,b=20))
+                fig.update_layout(template="plotly_dark", height=350, margin=dict(l=20, r=20, t=20, b=20))
                 st.plotly_chart(fig, use_container_width=True)
             with c2:
                 st.dataframe(
-                    df_t2, height=350, use_container_width=True, hide_index=True,
+                    df_t2, height=350, hide_index=True,
                     column_config={
                         "Debt (USD)": st.column_config.NumberColumn(format="$%.2f"),
                         "Collateral (USD)": st.column_config.NumberColumn(format="$%.2f"),
                         "Health Factor": st.column_config.NumberColumn(format="%.4f"),
-                    }
+                    },
+                    use_container_width=True,
                 )
         else:
             st.info("📋 Watchlist empty.")
@@ -471,20 +578,120 @@ with tab_exec:
     df_exec = load_executions()
     if not df_exec.empty:
         st.dataframe(
-            df_exec, use_container_width=True, hide_index=True,
+            df_exec, hide_index=True,
             column_config={
                 "profit_usdc": st.column_config.NumberColumn("Profit (USD)", format="$%.2f"),
                 "profit_eth": st.column_config.NumberColumn("Profit (ETH)", format="%.4f"),
-            }
+            },
+            use_container_width=True,
         )
     else:
         st.info("🏹 No liquidations yet.")
+
+# ─── DEX ARBITRAGE ────────────────────────
+with tab_arb:
+    st.subheader("🔄 DEX Arbitrage — Cross-Exchange Spread Monitor")
+
+    # ── Metrics Row ──
+    arb_k1, arb_k2, arb_k3 = st.columns(3)
+    with arb_k1:
+        st.markdown('<div class="kpi-profit">', unsafe_allow_html=True)
+        arb_total = load_arb_total_profit()
+        st.metric("💰 Total Arb Profit (USD)", f"${arb_total:,.2f}")
+        st.markdown('</div>', unsafe_allow_html=True)
+    with arb_k2:
+        st.markdown('<div class="kpi-arb">', unsafe_allow_html=True)
+        active_count = load_active_spreads_count(60)
+        st.metric("📊 Active Spreads (Last 1H)", f"{active_count}")
+        st.markdown('</div>', unsafe_allow_html=True)
+    with arb_k3:
+        st.markdown('<div class="kpi-safe">', unsafe_allow_html=True)
+        exec_count = load_arb_execution_count()
+        st.metric("✅ Successful Executions", f"{exec_count}")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    st.divider()
+
+    # ── Live Spread Chart ──
+    st.subheader("📈 Live Spread % Over Time")
+    df_spreads = load_arb_spreads(300)
+
+    if not df_spreads.empty:
+        # Ensure timestamp is datetime for proper plotting
+        df_spreads['timestamp'] = pd.to_datetime(df_spreads['timestamp'], errors='coerce')
+        df_spreads = df_spreads.dropna(subset=['timestamp'])
+        df_spreads = df_spreads.sort_values('timestamp', ascending=True)
+
+        # Create label column for legend
+        df_spreads['pair_route'] = df_spreads['token_pair'] + " (" + df_spreads['dex_a'] + " → " + df_spreads['dex_b'] + ")"
+
+        fig_spread = px.line(
+            df_spreads,
+            x='timestamp',
+            y='spread_percent',
+            color='token_pair',
+            labels={'spread_percent': 'Spread %', 'timestamp': 'Time'},
+            color_discrete_sequence=[
+                '#1e90ff', '#ff4757', '#2ed573', '#ffa502',
+                '#c56cf0', '#00d2d3', '#feca57',
+            ],
+        )
+
+        fig_spread.update_layout(
+            template="plotly_dark",
+            height=400,
+            xaxis=dict(gridcolor='rgba(255,255,255,0.05)'),
+            yaxis=dict(
+                gridcolor='rgba(255,255,255,0.05)',
+                title="Spread %",
+            ),
+            font=dict(family="JetBrains Mono"),
+            legend=dict(orientation="h", y=-0.15, x=0, font=dict(size=10)),
+            margin=dict(l=40, r=20, t=30, b=60),
+        )
+
+        # Add profitability threshold line
+        fig_spread.add_hline(
+            y=0.08,
+            line_dash="dot",
+            line_color="rgba(46, 213, 115, 0.5)",
+            annotation_text="Profit Threshold",
+            annotation_font_color="rgba(46, 213, 115, 0.7)",
+        )
+
+        st.plotly_chart(fig_spread, use_container_width=True)
+    else:
+        st.info("📊 No spread data yet. Start the arb_engine.py to begin scanning.")
+
+    st.divider()
+
+    # ── Historical Arb Executions Grid ──
+    st.subheader("📋 Arbitrage Execution History")
+    df_arb_exec = load_arb_executions(50)
+
+    if not df_arb_exec.empty:
+        st.dataframe(
+            df_arb_exec,
+            hide_index=True,
+            column_config={
+                "timestamp": st.column_config.TextColumn("Timestamp"),
+                "tx_hash": st.column_config.TextColumn("TX Hash"),
+                "token_pair": st.column_config.TextColumn("Pair"),
+                "dex_a": st.column_config.TextColumn("Buy DEX"),
+                "dex_b": st.column_config.TextColumn("Sell DEX"),
+                "profit_usd": st.column_config.NumberColumn("Profit (USD)", format="$%.2f"),
+            },
+            use_container_width=True,
+        )
+    else:
+        st.info("🔄 No arbitrage executions recorded yet.")
+
 
 # ─── TERMINAL ─────────────────────────────
 with tab_term:
     st.caption("Highlights: [SNIPER] [SCOUT] PROMOTED Pre-flight TX SENT")
     df_logs = load_logs(200)
-    
+
     # Fallback if DB empty
     if df_logs.empty:
         df_logs = load_logs_fallback(50)
