@@ -500,7 +500,10 @@ def build_v3_swap_calldata(
             0,  # sqrtPriceLimitX96 = 0
         )
     )
-    return fn._encode_transaction_data()
+    # _encode_transaction_data() returns a hex string ("0x...").
+    # Convert to raw bytes so eth_abi.encode() can handle it as `bytes`.
+    hex_data = fn._encode_transaction_data()
+    return bytes.fromhex(hex_data[2:]) if isinstance(hex_data, str) else bytes(hex_data)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -559,13 +562,15 @@ async def execute_arbitrage(
         )
 
         # Encode ArbParams struct
+        # All `bytes` fields must be raw bytes (not hex strings)
+        # All `address` fields must be checksummed
         arb_params = encode(
             ["(address,bytes,address,bytes,address)"],
             [(
                 w3.to_checksum_address(buy_config["router"]),
-                data_a,
+                bytes(data_a),   # ensure bytes type
                 w3.to_checksum_address(sell_config["router"]),
-                data_b,
+                bytes(data_b),   # ensure bytes type
                 w3.to_checksum_address(token_address),
             )]
         )
@@ -577,7 +582,7 @@ async def execute_arbitrage(
         tx = await contract.functions.requestFlashLoan(
             w3.to_checksum_address(USDC_ADDRESS),
             trade_amount,
-            arb_params,
+            bytes(arb_params),  # Explicit bytes — prevents ByteStringEncoder error
         ).build_transaction({
             "from": account.address,
             "nonce": nonce,
