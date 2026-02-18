@@ -60,8 +60,7 @@ if not PRIMARY_RPC:
     PRIMARY_RPC = os.getenv("RPC_URL", "")
 
 FALLBACK_RPCS = [r.strip() for r in os.getenv("FALLBACK_RPCS", "").split(",") if r.strip()]
-ALL_RPCS = [PRIMARY_RPC] + FALLBACK_RPCS
-current_rpc_idx = 0  # Index into ALL_RPCS
+# ALL_RPCS = [PRIMARY_RPC] + FALLBACK_RPCS  <-- managed by AsyncRPCManager now
 
 PRIVATE_KEY = os.getenv("PRIVATE_KEY", "")
 DEX_ARBITRAGEUR_ADDRESS = os.getenv("DEX_ARBITRAGEUR_ADDRESS", "")
@@ -117,6 +116,56 @@ USDC_DECIMALS = 6
 
 # Fixed flashloan size in USDC (6 decimals). $1000 USDC = 1_000_000_000
 FLASHLOAN_USDC_AMOUNT = 1000 * 10**USDC_DECIMALS  # $1,000
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ASYNC RPC MANAGER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class AsyncRPCManager:
+    """Manages RPC endpoints with automatic failover for 429 AND 403 errors."""
+    def __init__(self):
+        self.endpoints = [PRIMARY_RPC] + FALLBACK_RPCS
+        self.current_index = 0
+        self.strike_count = 0
+        self.w3 = None
+
+    async def connect(self):
+        """Connect to the current RPC endpoint. Closes any existing session first."""
+        # Gracefully close the previous aiohttp session
+        if self.w3 and hasattr(self.w3.provider, '_request_kwargs'):
+            try:
+                session = await self.w3.provider.cache_async_session(None)
+                if session and not session.closed:
+                    await session.close()
+                    logger.info("🔒 Previous aiohttp session closed cleanly.")
+            except Exception:
+                pass
+
+        url = self.endpoints[self.current_index]
+        logger.info(f"🔌 Connecting to RPC: {url[:40]}...")
+        self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(url))
+        if not await self.w3.is_connected():
+            raise ConnectionError(f"❌ Failed to connect to {url}")
+        logger.info(f"🟢 Connected to RPC [{self.current_index + 1}/{len(self.endpoints)}]")
+
+    async def handle_rate_limit(self):
+        """Handle 429/403 errors with adaptive backoff and failover."""
+        self.strike_count += 1
+
+        if self.strike_count >= 3:
+            self.strike_count = 0
+            self.current_index = (self.current_index + 1) % len(self.endpoints)
+            logger.warning(f"🔄 3 strikes! Switching to RPC [{self.current_index + 1}/{len(self.endpoints)}]")
+            await self.connect()
+        else:
+            cooldown = 2
+            logger.warning(f"⏳ Rate limited (Strike {self.strike_count}/3). Cooling down {cooldown}s...")
+            await asyncio.sleep(cooldown)
+
+    async def get_w3(self) -> AsyncWeb3:
+        if self.w3 is None:
+            await self.connect()
+        return self.w3
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # DEX CONFIGURATION — Arbitrum Mainnet (Real Addresses)
@@ -271,60 +320,88 @@ route_blacklist: Dict[str, float] = {}  # "TOKEN/dex_a/dex_b" -> blacklist times
 # QUOTE FETCHING
 # ═══════════════════════════════════════════════════════════════════════════════
 
-async def get_v3_quote(
-    w3: AsyncWeb3,
+async def get_v3_quote_robust(
+    rpc_manager: AsyncRPCManager,
+    semaphore: asyncio.Semaphore,
     quoter_address: str,
     token_in: str,
     token_out: str,
     amount_in: int,
     fee: int,
 ) -> Optional[int]:
-    """Fetch a quote from a Uniswap V3 / SushiSwap V3 QuoterV2."""
-    try:
-        quoter = w3.eth.contract(
-            address=w3.to_checksum_address(quoter_address),
-            abi=QUOTER_V2_ABI,
-        )
-        result = await quoter.functions.quoteExactInputSingle(
-            (
-                w3.to_checksum_address(token_in),
-                w3.to_checksum_address(token_out),
-                amount_in,
-                fee,
-                0,  # sqrtPriceLimitX96 = 0 (no limit)
-            )
-        ).call()
-        return result[0]  # amountOut
-    except (ContractLogicError, Exception):
-        return None
+    """Robust wrapper for get_v3_quote with retries."""
+    retries = 0
+    while retries < 3:
+        try:
+            w3 = await rpc_manager.get_w3()
+            async with semaphore:
+                quoter = w3.eth.contract(
+                    address=w3.to_checksum_address(quoter_address),
+                    abi=QUOTER_V2_ABI,
+                )
+                result = await quoter.functions.quoteExactInputSingle(
+                    (
+                        w3.to_checksum_address(token_in),
+                        w3.to_checksum_address(token_out),
+                        amount_in,
+                        fee,
+                        0,
+                    )
+                ).call()
+                return result[0]
+        except ContractLogicError:
+            # Pool doesn't exist or revert — legitimate failure
+            return None
+        except Exception as e:
+            err_str = str(e).lower()
+            if "429" in err_str or "403" in err_str or "connection" in err_str:
+                await rpc_manager.handle_rate_limit()
+                retries += 1
+            else:
+                return None
+    return None
 
 
-async def get_algebra_quote(
-    w3: AsyncWeb3,
+async def get_algebra_quote_robust(
+    rpc_manager: AsyncRPCManager,
+    semaphore: asyncio.Semaphore,
     quoter_address: str,
     token_in: str,
     token_out: str,
     amount_in: int,
 ) -> Optional[int]:
-    """Fetch a quote from Camelot (Algebra-style) Quoter."""
-    try:
-        quoter = w3.eth.contract(
-            address=w3.to_checksum_address(quoter_address),
-            abi=ALGEBRA_QUOTER_ABI,
-        )
-        result = await quoter.functions.quoteExactInputSingle(
-            w3.to_checksum_address(token_in),
-            w3.to_checksum_address(token_out),
-            amount_in,
-            0,  # limitSqrtPrice = 0
-        ).call()
-        return result[0]  # amountOut
-    except (ContractLogicError, Exception):
-        return None
+    """Robust wrapper for get_algebra_quote with retries."""
+    retries = 0
+    while retries < 3:
+        try:
+            w3 = await rpc_manager.get_w3()
+            async with semaphore:
+                quoter = w3.eth.contract(
+                    address=w3.to_checksum_address(quoter_address),
+                    abi=ALGEBRA_QUOTER_ABI,
+                )
+                result = await quoter.functions.quoteExactInputSingle(
+                    w3.to_checksum_address(token_in),
+                    w3.to_checksum_address(token_out),
+                    amount_in,
+                    0,
+                ).call()
+                return result[0]
+        except ContractLogicError:
+            return None
+        except Exception as e:
+            err_str = str(e).lower()
+            if "429" in err_str or "403" in err_str or "connection" in err_str:
+                await rpc_manager.handle_rate_limit()
+                retries += 1
+            else:
+                return None
+    return None
 
 
 async def get_best_quote_for_dex(
-    w3: AsyncWeb3,
+    rpc_manager: AsyncRPCManager,
+    semaphore: asyncio.Semaphore,
     dex_name: str,
     dex_config: dict,
     token_in: str,
@@ -333,13 +410,14 @@ async def get_best_quote_for_dex(
 ) -> Optional[int]:
     """
     Get the best quote across all fee tiers for a given DEX.
-    Returns the highest amountOut, or None if all fee tiers fail.
-    Uses asyncio.gather for concurrent fee tier queries.
     """
     if dex_config["type"] == "v3":
         # Fire all fee-tier quotes concurrently
         tasks = [
-            get_v3_quote(w3, dex_config["quoter"], token_in, token_out, amount_in, fee)
+            get_v3_quote_robust(
+                rpc_manager, semaphore, dex_config["quoter"], 
+                token_in, token_out, amount_in, fee
+            )
             for fee in dex_config["fee_tiers"]
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -347,8 +425,9 @@ async def get_best_quote_for_dex(
         return max(valid) if valid else None
 
     elif dex_config["type"] == "algebra":
-        return await get_algebra_quote(
-            w3, dex_config["quoter"], token_in, token_out, amount_in
+        return await get_algebra_quote_robust(
+            rpc_manager, semaphore, dex_config["quoter"], 
+            token_in, token_out, amount_in
         )
 
     return None
@@ -359,7 +438,8 @@ async def get_best_quote_for_dex(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 async def quote_sequential_route(
-    w3: AsyncWeb3,
+    rpc_manager: AsyncRPCManager,
+    semaphore: asyncio.Semaphore,
     token_address: str,
     dex_a_name: str,
     dex_a_config: dict,
@@ -371,13 +451,11 @@ async def quote_sequential_route(
     Simulate the EXACT two-leg arb route:
       Leg A: USDC → TOKEN on DEX_A  (buy token)
       Leg B: TOKEN → USDC on DEX_B  (sell token using exact Leg A output)
-
-    Returns route info if Leg B produces more USDC than the flashloan,
-    otherwise None.
     """
     # ── Leg A: USDC → TOKEN (buy on DEX_A) ──
     leg_a_out = await get_best_quote_for_dex(
-        w3, dex_a_name, dex_a_config,
+        rpc_manager, semaphore,
+        dex_a_name, dex_a_config,
         USDC_ADDRESS, token_address,
         flashloan_usdc,
     )
@@ -386,7 +464,8 @@ async def quote_sequential_route(
 
     # ── Leg B: TOKEN → USDC (sell exact Leg A output on DEX_B) ──
     leg_b_out = await get_best_quote_for_dex(
-        w3, dex_b_name, dex_b_config,
+        rpc_manager, semaphore,
+        dex_b_name, dex_b_config,
         token_address, USDC_ADDRESS,
         leg_a_out,     # <-- exact tokens received from Leg A
     )
@@ -613,11 +692,12 @@ async def execute_arbitrage(
 # MAIN SCANNING LOOP
 # ═══════════════════════════════════════════════════════════════════════════════
 
-async def get_eth_price(w3: AsyncWeb3) -> float:
+async def get_eth_price(rpc_manager: AsyncRPCManager, semaphore: asyncio.Semaphore) -> float:
     """Get ETH price in USD by quoting 1 WETH → USDC on Uniswap V3."""
     try:
-        quote = await get_v3_quote(
-            w3,
+        quote = await get_v3_quote_robust(
+            rpc_manager,
+            semaphore,
             UNI_V3_QUOTER,
             TOKENS["WETH"]["address"],
             USDC_ADDRESS,
@@ -631,21 +711,17 @@ async def get_eth_price(w3: AsyncWeb3) -> float:
     return 2500.0  # Fallback estimate
 
 
-async def scan_and_execute(w3: AsyncWeb3, block_number: int, eth_price_usd: float):
+async def scan_and_execute(rpc_manager: AsyncRPCManager, block_number: int, eth_price_usd: float):
     """
     Core scan loop for one block.
-
-    For each token, for each ORDERED permutation of (DEX_A, DEX_B):
-      1. Quote USDC → TOKEN on DEX_A  (Leg A — buy)
-      2. Quote TOKEN → USDC on DEX_B  (Leg B — sell, using Leg A's exact output)
-      3. If Leg B output > flashloan + fees → it's a real opportunity
-
-    Uses asyncio.gather to run all route quotes concurrently per token.
-    Respects route confidence blacklist.
     """
     spreads_found = 0
     now = time.time()
     dex_names = list(DEXES.keys())
+    w3 = await rpc_manager.get_w3()
+    
+    # Strictly limit concurrent tasks to avoid 429s (Too Many Requests)
+    sem = asyncio.Semaphore(15)
 
     for symbol, token_info in TOKENS.items():
         token_address = token_info["address"]
@@ -667,7 +743,8 @@ async def scan_and_execute(w3: AsyncWeb3, block_number: int, eth_price_usd: floa
 
             route_tasks.append(
                 quote_sequential_route(
-                    w3, token_address,
+                    rpc_manager, sem,
+                    token_address,
                     dex_a_name, DEXES[dex_a_name],
                     dex_b_name, DEXES[dex_b_name],
                     FLASHLOAN_USDC_AMOUNT,
@@ -762,25 +839,21 @@ async def scan_and_execute(w3: AsyncWeb3, block_number: int, eth_price_usd: floa
 
 async def main():
     """Main entry point — continuous block-by-block scanning with RPC failover."""
-    global current_rpc_idx
-
     logger.info("═══════════════════════════════════════════════════════════")
-    logger.info("🛸 ANTI-GRAVITY — DEX Arbitrage Engine v2.0")
+    logger.info("🛸 ANTI-GRAVITY — DEX Arbitrage Engine v2.1")
     logger.info("═══════════════════════════════════════════════════════════")
-    logger.info(f"🔗 Primary RPC: {PRIMARY_RPC[:50]}...")
-    logger.info(f"🔗 Fallback RPCs: {len(FALLBACK_RPCS)} configured")
+    
+    # Initialize RPC Manager
+    rpc_manager = AsyncRPCManager()
+    await rpc_manager.connect()
+    
     logger.info(f"📊 Scanning {len(TOKENS)} tokens across {len(DEXES)} DEXs")
     logger.info(f"🎯 Tokens: {', '.join(TOKENS.keys())}")
     logger.info(f"🏪 DEXs: {', '.join(DEXES.keys())}")
     logger.info(f"💰 Min Profit: ${MIN_PROFIT_USD}")
     logger.info("═══════════════════════════════════════════════════════════")
 
-    w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(ALL_RPCS[current_rpc_idx]))
-
-    if not await w3.is_connected():
-        logger.critical("❌ Failed to connect to RPC — exiting")
-        return
-
+    w3 = await rpc_manager.get_w3()
     chain_id = await w3.eth.chain_id
     logger.info(f"✅ Connected to chain {chain_id}")
 
@@ -795,23 +868,28 @@ async def main():
     send_telegram_alert(
         f"🔄 <b>DEX Arb Engine Started</b>\n"
         f"📊 {len(TOKENS)} tokens × {len(DEXES)} DEXs\n"
-        f"🔗 RPC: <code>{ALL_RPCS[current_rpc_idx][:40]}...</code>"
+        f"🔗 RPC: <code>{rpc_manager.endpoints[0][:40]}...</code>"
     )
 
     last_block = 0
-    eth_price_usd = await get_eth_price(w3)
+    # Use dummy semaphore for initial price fetch
+    sem = asyncio.Semaphore(1) 
+    eth_price_usd = await get_eth_price(rpc_manager, sem)
     eth_price_refresh = time.time()
-    consecutive_errors = 0
+    
     logger.info(f"📈 ETH Price: ${eth_price_usd:,.0f}")
 
     # ── Infinite Scan Loop ──
     while True:
         try:
             scan_start = time.time()
-            current_block = await w3.eth.block_number
-
-            # Reset error counter on success
-            consecutive_errors = 0
+            w3 = await rpc_manager.get_w3()
+            
+            try:
+                current_block = await w3.eth.block_number
+            except Exception:
+                await rpc_manager.handle_rate_limit()
+                continue
 
             # Skip if same block
             if current_block <= last_block:
@@ -820,12 +898,12 @@ async def main():
 
             # Refresh ETH price every 5 minutes
             if time.time() - eth_price_refresh > 300:
-                eth_price_usd = await get_eth_price(w3)
+                eth_price_usd = await get_eth_price(rpc_manager, sem)
                 eth_price_refresh = time.time()
                 logger.info(f"📈 ETH Price refreshed: ${eth_price_usd:,.0f}")
 
             # ── Run scan ──
-            spreads = await scan_and_execute(w3, current_block, eth_price_usd)
+            spreads = await scan_and_execute(rpc_manager, current_block, eth_price_usd)
 
             scan_duration = time.time() - scan_start
             blocks_jumped = current_block - last_block if last_block > 0 else 1
@@ -846,32 +924,9 @@ async def main():
             logger.info("⏹️  Shutting down gracefully...")
             break
         except Exception as e:
-            consecutive_errors += 1
-            err_str = str(e).lower()
-            is_rpc_error = any(x in err_str for x in ["429", "403", "rate", "forbidden", "timeout", "connection"])
-
-            logger.error(f"❌ Loop error (#{consecutive_errors}): {e}")
+            logger.error(f"❌ Loop error: {e}")
             logger.debug(traceback.format_exc())
-
-            # ── RPC Failover on 3 consecutive errors ──
-            if is_rpc_error and consecutive_errors >= 3 and len(ALL_RPCS) > 1:
-                old_idx = current_rpc_idx
-                current_rpc_idx = (current_rpc_idx + 1) % len(ALL_RPCS)
-                new_rpc = ALL_RPCS[current_rpc_idx]
-                logger.warning(f"🔄 3 strikes! Switching RPC [{old_idx+1}→{current_rpc_idx+1}/{len(ALL_RPCS)}]: {new_rpc[:40]}...")
-                w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(new_rpc))
-                consecutive_errors = 0
-                send_telegram_alert(
-                    f"⚠️ <b>Arb Engine RPC Failover</b>\n"
-                    f"🔄 Switched to: <code>{new_rpc[:40]}...</code>"
-                )
-            elif consecutive_errors >= 10:
-                send_telegram_alert(
-                    f"🆘 <b>Arb Engine: {consecutive_errors} consecutive errors</b>\n"
-                    f"<code>{e}</code>"
-                )
-
-            await asyncio.sleep(3)
+            await asyncio.sleep(1)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
