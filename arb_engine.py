@@ -30,7 +30,7 @@ import requests as req_sync
 from dotenv import load_dotenv
 from web3 import AsyncWeb3
 from web3.exceptions import ContractLogicError
-from eth_abi import encode
+from eth_abi import encode, decode
 from hexbytes import HexBytes
 
 import db_manager
@@ -399,95 +399,76 @@ async def get_algebra_quote_robust(
     return None
 
 
-async def get_best_quote_for_dex(
-    rpc_manager: AsyncRPCManager,
-    semaphore: asyncio.Semaphore,
-    dex_name: str,
-    dex_config: dict,
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MULTICALL HELPER FUNCTIONS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _encode_quoter_call(
+    w3: AsyncWeb3,
+    quoter_address: str,
     token_in: str,
     token_out: str,
     amount_in: int,
-) -> Optional[int]:
+    fee: int,
+    dex_type: str,
+) -> Tuple[str, bytes]:
     """
-    Get the best quote across all fee tiers for a given DEX.
+    Generate (target, calldata) for a quote call.
+    Does NOT make an RPC call.
     """
-    if dex_config["type"] == "v3":
-        # Fire all fee-tier quotes concurrently
-        tasks = [
-            get_v3_quote_robust(
-                rpc_manager, semaphore, dex_config["quoter"], 
-                token_in, token_out, amount_in, fee
-            )
-            for fee in dex_config["fee_tiers"]
-        ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        valid = [r for r in results if isinstance(r, int) and r > 0]
-        return max(valid) if valid else None
-
-    elif dex_config["type"] == "algebra":
-        return await get_algebra_quote_robust(
-            rpc_manager, semaphore, dex_config["quoter"], 
-            token_in, token_out, amount_in
+    quoter_contract = w3.eth.contract(
+        address=w3.to_checksum_address(quoter_address),
+        abi=QUOTER_V2_ABI if dex_type == "v3" else ALGEBRA_QUOTER_ABI,
+    )
+    
+    if dex_type == "v3":
+        # Checksum addresses strictly for encoding
+        t_in = w3.to_checksum_address(token_in)
+        t_out = w3.to_checksum_address(token_out)
+        
+        # quoteExactInputSingle((tokenIn, tokenOut, amountIn, fee, sqrtPriceLimitX96))
+        call_fn = quoter_contract.functions.quoteExactInputSingle((
+            t_in, t_out, amount_in, fee, 0
+        ))
+    else:  # algebra
+        t_in = w3.to_checksum_address(token_in)
+        t_out = w3.to_checksum_address(token_out)
+        
+        # quoteExactInputSingle(tokenIn, tokenOut, amountIn, limitSqrtPrice)
+        call_fn = quoter_contract.functions.quoteExactInputSingle(
+            t_in, t_out, amount_in, 0
         )
+        
+    # Extract raw calldata
+    # We use _encode_transaction_data() which returns a hex string "0x..."
+    hex_data = call_fn._encode_transaction_data()
+    raw_data = bytes.fromhex(hex_data[2:]) if isinstance(hex_data, str) else bytes(hex_data)
+    
+    return (quoter_contract.address, raw_data)
 
-    return None
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# SEQUENTIAL A→B ROUTE QUOTING
-# ═══════════════════════════════════════════════════════════════════════════════
-
-async def quote_sequential_route(
-    rpc_manager: AsyncRPCManager,
-    semaphore: asyncio.Semaphore,
-    token_address: str,
-    dex_a_name: str,
-    dex_a_config: dict,
-    dex_b_name: str,
-    dex_b_config: dict,
-    flashloan_usdc: int,
-) -> Optional[dict]:
+def _decode_quoter_result(raw_bytes: bytes, dex_type: str) -> int:
     """
-    Simulate the EXACT two-leg arb route:
-      Leg A: USDC → TOKEN on DEX_A  (buy token)
-      Leg B: TOKEN → USDC on DEX_B  (sell token using exact Leg A output)
+    Decode the return bytes from Multicall3.tryAggregate.
+    Returns amountOut (int) or 0 on failure.
     """
-    # ── Leg A: USDC → TOKEN (buy on DEX_A) ──
-    leg_a_out = await get_best_quote_for_dex(
-        rpc_manager, semaphore,
-        dex_a_name, dex_a_config,
-        USDC_ADDRESS, token_address,
-        flashloan_usdc,
-    )
-    if not leg_a_out or leg_a_out == 0:
-        return None
-
-    # ── Leg B: TOKEN → USDC (sell exact Leg A output on DEX_B) ──
-    leg_b_out = await get_best_quote_for_dex(
-        rpc_manager, semaphore,
-        dex_b_name, dex_b_config,
-        token_address, USDC_ADDRESS,
-        leg_a_out,     # <-- exact tokens received from Leg A
-    )
-    if not leg_b_out or leg_b_out == 0:
-        return None
-
-    # ── Profitability: Is Leg B output > flashloan + Aave fee? ──
-    flashloan_fee = (flashloan_usdc * AAVE_FLASHLOAN_FEE_BPS) // 10000
-    total_repay = flashloan_usdc + flashloan_fee
-    gross_profit_raw = leg_b_out - total_repay  # In USDC raw (6 decimals)
-    gross_profit_usd = gross_profit_raw / (10 ** USDC_DECIMALS)
-
-    return {
-        "dex_a": dex_a_name,         # Buy leg
-        "dex_b": dex_b_name,         # Sell leg
-        "flashloan_usdc": flashloan_usdc,
-        "leg_a_token_out": leg_a_out, # Exact intermediate token amount
-        "leg_b_usdc_out": leg_b_out,  # Final USDC returned
-        "total_repay": total_repay,   # Flashloan + fee
-        "gross_profit_raw": gross_profit_raw,
-        "gross_profit_usd": gross_profit_usd,
-    }
+    if not raw_bytes:
+        return 0
+    try:
+        if dex_type == "v3":
+            # Returns (amountOut, sqrtPriceX96After, initializedTicksCrossed, gasEstimate)
+            # Tuple types: (uint256, uint160, uint32, uint256)
+            decoded = decode(['uint256', 'uint160', 'uint32', 'uint256'], raw_bytes)
+            return decoded[0]
+        else:  # algebra
+            # Returns (amountOut, fee)
+            # Tuple types: (uint256, uint16)
+            decoded = decode(['uint256', 'uint16'], raw_bytes)
+            return decoded[0]
+    except Exception:
+        return 0
 
 
 def estimate_net_profit_usd(
@@ -692,20 +673,26 @@ async def execute_arbitrage(
 # MAIN SCANNING LOOP
 # ═══════════════════════════════════════════════════════════════════════════════
 
-async def get_eth_price(rpc_manager: AsyncRPCManager, semaphore: asyncio.Semaphore) -> float:
-    """Get ETH price in USD by quoting 1 WETH → USDC on Uniswap V3."""
+async def get_eth_price(rpc_manager: AsyncRPCManager) -> float:
+    """Get ETH price in USD via Multicall (1 call)."""
     try:
-        quote = await get_v3_quote_robust(
-            rpc_manager,
-            semaphore,
-            UNI_V3_QUOTER,
-            TOKENS["WETH"]["address"],
-            USDC_ADDRESS,
-            10**18,  # 1 WETH
-            500,     # 0.05% pool
+        w3 = await rpc_manager.get_w3()
+        multicall = w3.eth.contract(address=MULTICALL3_ADDRESS, abi=MULTICALL3_ABI)
+        
+        # Quote 1 WETH → USDC on UniV3 0.05%
+        target, data = _encode_quoter_call(
+            w3, UNI_V3_QUOTER, 
+            TOKENS["WETH"]["address"], USDC_ADDRESS, 
+            10**18, 500, "v3"
         )
-        if quote:
+        
+        result = await multicall.functions.tryAggregate(False, [(target, data)]).call()
+        success, ret_bytes = result[0]
+        
+        if success:
+            quote = _decode_quoter_result(ret_bytes, "v3")
             return quote / (10 ** USDC_DECIMALS)
+            
     except Exception:
         pass
     return 2500.0  # Fallback estimate
@@ -713,126 +700,205 @@ async def get_eth_price(rpc_manager: AsyncRPCManager, semaphore: asyncio.Semapho
 
 async def scan_and_execute(rpc_manager: AsyncRPCManager, block_number: int, eth_price_usd: float):
     """
-    Core scan loop for one block.
+    2-Step Multicall3 Scan Loop (0 Rate Limits).
+    
+    Leg A Batch: USDC → Token per (DEX, Fee)  [1 RPC Call]
+    Leg B Batch: Token → USDC per (DEX, Fee) using Leg A output  [1 RPC Call]
+    Execute: If Leg B output > flashloan + fees
     """
     spreads_found = 0
     now = time.time()
-    dex_names = list(DEXES.keys())
     w3 = await rpc_manager.get_w3()
+    multicall = w3.eth.contract(address=MULTICALL3_ADDRESS, abi=MULTICALL3_ABI)
     
-    # Strictly limit concurrent tasks to avoid 429s (Too Many Requests)
-    sem = asyncio.Semaphore(15)
+    # ════════════════════════════════════════════════════════════════════════════
+    # STEP 1: BATCH LEG A (USDC → TOKEN)
+    # ════════════════════════════════════════════════════════════════════════════
+    leg_a_calls = []
+    leg_a_map = []  # Tuple (symbol, dex_name, fee_tier) to map results back
 
     for symbol, token_info in TOKENS.items():
-        token_address = token_info["address"]
+        token_addr = token_info["address"]
+        
+        for dex_name, dex_config in DEXES.items():
+            fees = dex_config["fee_tiers"]
+            for fee in fees:
+                target, calldata = _encode_quoter_call(
+                    w3, 
+                    dex_config["quoter"], 
+                    USDC_ADDRESS, 
+                    token_addr, 
+                    FLASHLOAN_USDC_AMOUNT, 
+                    fee, 
+                    dex_config["type"]
+                )
+                leg_a_calls.append((target, calldata))
+                leg_a_map.append((symbol, dex_name, fee, dex_config["type"]))
 
-        # ── Build tasks for every ordered DEX pair (permutations, not combos) ──
-        route_tasks = []
-        route_keys = []
-        for dex_a_name, dex_b_name in permutations(dex_names, 2):
-            route_key = f"{symbol}/{dex_a_name}/{dex_b_name}"
+    if not leg_a_calls:
+        return 0
 
-            # Skip blacklisted routes
+    # Execute Leg A Batch
+    try:
+        # tryAggregate(requireSuccess=False, calls=...)
+        leg_a_results = await multicall.functions.tryAggregate(False, leg_a_calls).call()
+    except Exception as e:
+        logger.error(f"❌ Leg A Multicall failed: {e}")
+        await rpc_manager.handle_rate_limit()
+        return 0
+
+    # Decode Leg A results
+    # best_leg_a: {symbol: {dex_name: max_amount_out_observed}}
+    best_leg_a = {s: {} for s in TOKENS}
+
+    for idx, (success, ret_bytes) in enumerate(leg_a_results):
+        if not success or not ret_bytes:
+            continue
+            
+        symbol, dex_name, fee, dex_type = leg_a_map[idx]
+        amount_out = _decode_quoter_result(ret_bytes, dex_type)
+        
+        if amount_out > 0:
+            current_max = best_leg_a[symbol].get(dex_name, 0)
+            if amount_out > current_max:
+                best_leg_a[symbol][dex_name] = amount_out
+
+    # ════════════════════════════════════════════════════════════════════════════
+    # STEP 2: BATCH LEG B (TOKEN → USDC)
+    # ════════════════════════════════════════════════════════════════════════════
+    leg_b_calls = []
+    leg_b_map = []  # Tuple (symbol, buy_dex, sell_dex, sell_fee, sell_dex_type, amount_in_token)
+
+    for symbol in TOKENS:
+        token_addr = TOKENS[symbol]["address"]
+        
+        # Iterating per DEX permutations
+        dex_names = list(DEXES.keys())
+        for buy_dex, sell_dex in permutations(dex_names, 2):
+            
+            # Check if we have a valid Leg A output for this buy_dex
+            amount_in_token = best_leg_a[symbol].get(buy_dex, 0)
+            if amount_in_token == 0:
+                continue
+
+            # Route Confidence Check
+            route_key = f"{symbol}/{buy_dex}/{sell_dex}"
             if route_key in route_blacklist:
                 if now - route_blacklist[route_key] < ROUTE_COOLDOWN_SECONDS:
                     continue
                 else:
                     del route_blacklist[route_key]
                     route_failures.pop(route_key, None)
-                    logger.info(f"🔓 Route {route_key} cooldown expired, re-enabled")
+                    logger.info(f"🔓 Route {route_key} cooldown expired")
 
-            route_tasks.append(
-                quote_sequential_route(
-                    rpc_manager, sem,
-                    token_address,
-                    dex_a_name, DEXES[dex_a_name],
-                    dex_b_name, DEXES[dex_b_name],
-                    FLASHLOAN_USDC_AMOUNT,
+            # Build Leg B calls for all fee tiers of sell_dex
+            sell_config = DEXES[sell_dex]
+            fees = sell_config["fee_tiers"]
+            
+            for fee in fees:
+                target, calldata = _encode_quoter_call(
+                    w3, 
+                    sell_config["quoter"], 
+                    token_addr, 
+                    USDC_ADDRESS, 
+                    amount_in_token, # Exact output from Leg A
+                    fee, 
+                    sell_config["type"]
                 )
-            )
-            route_keys.append(route_key)
+                leg_b_calls.append((target, calldata))
+                leg_b_map.append((symbol, buy_dex, sell_dex, fee, sell_config["type"], amount_in_token))
 
-        if not route_tasks:
+    if not leg_b_calls:
+        return 0
+
+    # Execute Leg B Batch
+    try:
+        leg_b_results = await multicall.functions.tryAggregate(False, leg_b_calls).call()
+    except Exception as e:
+        logger.warning(f"⚠️ Leg B Multicall failed: {e}")
+        return 0
+
+    # Decode Leg B results & Find Profit
+    for idx, (success, ret_bytes) in enumerate(leg_b_results):
+        if not success or not ret_bytes:
+            continue
+            
+        symbol, buy_dex, sell_dex, sell_fee, sell_dex_type, amount_in_token = leg_b_map[idx]
+        amount_out_usdc = _decode_quoter_result(ret_bytes, sell_dex_type)
+        
+        if amount_out_usdc == 0:
             continue
 
-        # ── Fire all route quotes concurrently via asyncio.gather ──
-        route_results = await asyncio.gather(*route_tasks, return_exceptions=True)
+        # ── Profit Calculation ──
+        flashloan_fee = (FLASHLOAN_USDC_AMOUNT * AAVE_FLASHLOAN_FEE_BPS) // 10000
+        total_repay = FLASHLOAN_USDC_AMOUNT + flashloan_fee
+        gross_profit_raw = amount_out_usdc - total_repay
+        gross_profit_usd = gross_profit_raw / (10 ** USDC_DECIMALS)
+        
+        spread_pct = (gross_profit_raw / FLASHLOAN_USDC_AMOUNT) * 100.0
 
-        # ── Evaluate results ──
-        for route_key, result in zip(route_keys, route_results):
-            if isinstance(result, Exception) or result is None:
-                continue
-
-            gross_profit_usd = result["gross_profit_usd"]
-            spread_pct = (result["gross_profit_raw"] / FLASHLOAN_USDC_AMOUNT) * 100.0 if FLASHLOAN_USDC_AMOUNT > 0 else 0
-
-            # Log all meaningful spreads to DB for charting
-            if spread_pct > 0.01:
-                try:
-                    db_manager.log_arb_spread(
-                        token_pair=f"{symbol}/USDC",
-                        dex_a=result["dex_a"],
-                        dex_b=result["dex_b"],
-                        spread_percent=round(spread_pct, 4),
-                    )
-                except Exception:
-                    pass
-                spreads_found += 1
-
-            # Log significant spreads
-            if spread_pct > 0.05:
-                logger.info(
-                    f"📊 {symbol}/USDC | {result['dex_a']}→{result['dex_b']} | "
-                    f"Spread: {spread_pct:.3f}% | Gross: ${gross_profit_usd:.2f} | "
-                    f"Tokens: {result['leg_a_token_out']} | "
-                    f"USDC out: {result['leg_b_usdc_out']}"
+        # Log meaningful spreads
+        if spread_pct > 0.05:
+            logger.info(
+                f"📊 {symbol}/USDC | {buy_dex}→{sell_dex} | "
+                f"Spread: {spread_pct:.3f}% | Gross: ${gross_profit_usd:.2f} | "
+                f"Net: ${gross_profit_usd:.2f}"
+            )
+            
+            # DB logging
+            try:
+                db_manager.log_arb_spread(
+                    token_pair=f"{symbol}/USDC",
+                    dex_a=buy_dex,
+                    dex_b=sell_dex,
+                    spread_percent=round(spread_pct, 4),
                 )
+            except Exception:
+                pass
+            spreads_found += 1
 
-            # ── Profitability gate ──
-            if gross_profit_usd <= 0:
-                continue
+        if gross_profit_usd <= 0:
+            continue
 
-            # Estimate gas cost
-            gas_price = await w3.eth.gas_price
-            gas_cost_wei = 500_000 * gas_price
+        # Estimate Net Profit (minus gas)
+        gas_price = await w3.eth.gas_price
+        gas_cost_wei = 500_000 * gas_price
+        
+        net_profit = estimate_net_profit_usd(
+            gross_profit_usd,
+            gas_cost_wei,
+            eth_price_usd
+        )
 
-            net_profit = estimate_net_profit_usd(
-                gross_profit_usd,
-                gas_cost_wei,
-                eth_price_usd,
+        if net_profit >= MIN_PROFIT_USD:
+            logger.info(
+                f"💰 PROFITABLE: {symbol}/USDC | Net: +${net_profit:.2f} | "
+                f"Route: {buy_dex} → {sell_dex}"
             )
 
-            if net_profit >= MIN_PROFIT_USD:
-                logger.info(
-                    f"💰 PROFITABLE: {symbol}/USDC | Net: +${net_profit:.2f} | "
-                    f"Route: {result['dex_a']} → {result['dex_b']} | "
-                    f"Tokens mid: {result['leg_a_token_out']} | "
-                    f"USDC in: {FLASHLOAN_USDC_AMOUNT} | USDC out: {result['leg_b_usdc_out']}"
-                )
-
-                tx_hash = await execute_arbitrage(
-                    w3=w3,
-                    token_symbol=symbol,
-                    token_address=token_address,
-                    dex_a=result["dex_a"],
-                    dex_b=result["dex_b"],
-                    flashloan_usdc=FLASHLOAN_USDC_AMOUNT,
-                    leg_a_token_out=result["leg_a_token_out"],
-                    leg_b_usdc_out=result["leg_b_usdc_out"],
-                    net_profit_usd=net_profit,
-                )
-
-                if tx_hash:
-                    logger.info(f"✅ Arb executed: {tx_hash}")
-                    route_failures.pop(route_key, None)
-                else:
-                    route_failures[route_key] = route_failures.get(route_key, 0) + 1
-                    if route_failures[route_key] >= MAX_ROUTE_FAILURES:
-                        route_blacklist[route_key] = now
-                        logger.warning(
-                            f"🚫 Route {route_key} blacklisted after "
-                            f"{MAX_ROUTE_FAILURES} failures (cooldown: {ROUTE_COOLDOWN_SECONDS}s)"
-                        )
+            # Fire execution
+            tx_hash = await execute_arbitrage(
+                w3=w3,
+                token_symbol=symbol,
+                token_address=TOKENS[symbol]["address"],
+                dex_a=buy_dex,
+                dex_b=sell_dex,
+                flashloan_usdc=FLASHLOAN_USDC_AMOUNT,
+                leg_a_token_out=amount_in_token,
+                leg_b_usdc_out=amount_out_usdc,
+                net_profit_usd=net_profit,
+            )
+            
+            route_key = f"{symbol}/{buy_dex}/{sell_dex}"
+            if not tx_hash:
+                # Blacklist on failure
+                route_failures[route_key] = route_failures.get(route_key, 0) + 1
+                if route_failures[route_key] >= MAX_ROUTE_FAILURES:
+                    route_blacklist[route_key] = now
+                    logger.warning(f"🚫 Route {route_key} blacklisted")
+            else:
+                # Success - clear failures
+                route_failures.pop(route_key, None)
 
     return spreads_found
 
@@ -866,15 +932,14 @@ async def main():
 
     # Telegram startup notification
     send_telegram_alert(
-        f"🔄 <b>DEX Arb Engine Started</b>\n"
+        f"🔄 <b>DEX Arb Engine Started (Multicall3)</b>\n"
         f"📊 {len(TOKENS)} tokens × {len(DEXES)} DEXs\n"
         f"🔗 RPC: <code>{rpc_manager.endpoints[0][:40]}...</code>"
     )
 
     last_block = 0
-    # Use dummy semaphore for initial price fetch
-    sem = asyncio.Semaphore(1) 
-    eth_price_usd = await get_eth_price(rpc_manager, sem)
+    # Use dummy semaphore for initial price fetch (Multicall inside get_eth_price doesn't use it, but valid for sig)
+    eth_price_usd = await get_eth_price(rpc_manager)
     eth_price_refresh = time.time()
     
     logger.info(f"📈 ETH Price: ${eth_price_usd:,.0f}")
@@ -898,7 +963,7 @@ async def main():
 
             # Refresh ETH price every 5 minutes
             if time.time() - eth_price_refresh > 300:
-                eth_price_usd = await get_eth_price(rpc_manager, sem)
+                eth_price_usd = await get_eth_price(rpc_manager)
                 eth_price_refresh = time.time()
                 logger.info(f"📈 ETH Price refreshed: ${eth_price_usd:,.0f}")
 
