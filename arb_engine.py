@@ -104,37 +104,37 @@ TOKENS: Dict[str, dict] = {
     "WETH": {
         "address": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
         "decimals": 18,
-        "quote_amount": 1 * 10**18,          # 1 WETH
+        "quote_amount": 5 * 10**17,            # 0.5 WETH (~$1250)
     },
     "ARB": {
         "address": "0x912CE59144191C1204E64559FE8253a0e49E6548",
         "decimals": 18,
-        "quote_amount": 5000 * 10**18,        # 5000 ARB
+        "quote_amount": 1000 * 10**18,          # 1000 ARB (~$1000)
     },
     "MAGIC": {
         "address": "0x539bdE0d7Dbd33f84E8aaf9084C942D9800Ef002",
         "decimals": 18,
-        "quote_amount": 10000 * 10**18,       # 10000 MAGIC
+        "quote_amount": 1500 * 10**18,           # 1500 MAGIC (~$750)
     },
     "GRAIL": {
         "address": "0x3d9907F9a368ad0a51Be60f7Da3b97cf940982D8",
         "decimals": 18,
-        "quote_amount": 10 * 10**18,          # 10 GRAIL
+        "quote_amount": 3 * 10**18,              # 3 GRAIL (~$600)
     },
     "PENDLE": {
         "address": "0x0c880f6761F1af8d9Aa9C466984785263cf79560",
         "decimals": 18,
-        "quote_amount": 2000 * 10**18,        # 2000 PENDLE
+        "quote_amount": 200 * 10**18,            # 200 PENDLE (~$700)
     },
     "GMX": {
         "address": "0xfc5A1A6EB076a2C7AD06EDb220f4daaC9AF172af",
         "decimals": 18,
-        "quote_amount": 50 * 10**18,          # 50 GMX
+        "quote_amount": 20 * 10**18,             # 20 GMX (~$600)
     },
     "RDNT": {
         "address": "0x3082CC23568eA640225c2467653dB90e9250AaA0",
         "decimals": 18,
-        "quote_amount": 50000 * 10**18,       # 50000 RDNT
+        "quote_amount": 10000 * 10**18,           # 10000 RDNT (~$500)
     },
 }
 
@@ -275,10 +275,20 @@ ARB_CONTRACT_ABI = [
 # CONSTANTS
 # ═══════════════════════════════════════════════════════════════════════════════
 AAVE_FLASHLOAN_FEE_BPS = 5        # 0.05% = 5 basis points
-MIN_PROFIT_USD = 0.50              # Minimum net profit after all costs
+MIN_PROFIT_USD = 5.00              # $5 minimum — accounts for gas spikes + slippage drift
 MAX_GAS_PRICE_GWEI = 1.0          # Arbitrum gas is cheap, but cap it
 SCAN_COOLDOWN_SECONDS = 0.5       # Minimum time between scans
 MAX_SLIPPAGE_BPS = 50             # 0.5% max slippage for trade sizing
+SAFETY_MARGIN_MULTIPLIER = 1.5    # Extra margin on cost estimates to avoid NotProfitable
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ROUTE CONFIDENCE — Tracks simulation failures per route
+# Routes with repeated failures get temporarily blacklisted.
+# ═══════════════════════════════════════════════════════════════════════════════
+MAX_ROUTE_FAILURES = 3            # After 3 sim failures, skip route
+ROUTE_COOLDOWN_SECONDS = 600      # 10-minute cooldown after blacklist
+route_failures: Dict[str, int] = {}     # "TOKEN/buy_dex/sell_dex" -> failure count
+route_blacklist: Dict[str, float] = {}  # "TOKEN/buy_dex/sell_dex" -> blacklist timestamp
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # QUOTE FETCHING
@@ -381,7 +391,12 @@ def calculate_spread(
     """
     Given quotes from multiple DEXs for the same pair & direction,
     find the max spread between any two DEXs.
-    Returns: {dex_high, dex_low, spread_pct, buy_price, sell_price} or None
+
+    The spread is the GROSS spread. The caller must subtract
+    flashloan fees + gas to get net profit.
+
+    Returns: {sell_dex, buy_dex, spread_pct, amount_high, amount_low,
+              net_spread_pct} or None
     """
     valid = {k: v for k, v in quotes.items() if v is not None and v > 0}
     if len(valid) < 2:
@@ -396,21 +411,22 @@ def calculate_spread(
     if low_val == 0:
         return None
 
-    spread_pct = ((high_val - low_val) / low_val) * 100.0
+    gross_spread_pct = ((high_val - low_val) / low_val) * 100.0
+
+    # Net spread after Aave flashloan fee (0.05%) — the REAL number
+    flashloan_fee_pct = AAVE_FLASHLOAN_FEE_BPS / 100.0  # 0.05%
+    net_spread_pct = gross_spread_pct - flashloan_fee_pct
 
     return {
-        "dex_high": dex_high,       # Buy here (cheaper — gives more output)
-        "dex_low": dex_low,         # Sell here — wait, reverse:
-        # Actually: high_val DEX gives MORE output → it's the SELL side
-        # low_val DEX gives LESS output → it's the BUY side (token is more expensive)
-        # For arb: Buy on dex_low (where token is cheap relative to USDC),
-        #          Sell on dex_high (where token is expensive relative to USDC)
-        # But since we're quoting TOKEN→USDC, high output = better sell price
-        "sell_dex": dex_high,
-        "buy_dex": dex_low,
-        "spread_pct": spread_pct,
+        "sell_dex": dex_high,    # Higher output → sell here
+        "buy_dex": dex_low,      # Lower output → buy here (token cheaper)
+        "spread_pct": gross_spread_pct,
+        "net_spread_pct": net_spread_pct,
         "amount_high": high_val,
         "amount_low": low_val,
+        # Legacy keys for backward compat
+        "dex_high": dex_high,
+        "dex_low": dex_low,
     }
 
 
@@ -449,20 +465,25 @@ def estimate_net_profit_usd(
     eth_price_usd: float,
 ) -> float:
     """
-    Calculate net profit in USD after deducting:
-      1. Aave flashloan fee (0.05%)
-      2. Gas cost
-    The spread itself already accounts for DEX swap fees (they're embedded in quotes).
+    Conservative net profit calculation.
+    Deducts:
+      1. Aave flashloan fee (0.05%) with safety multiplier
+      2. Gas cost with safety multiplier
+    The spread itself already accounts for DEX swap fees (embedded in quotes).
     """
     # Gross spread in USDC terms (6 decimals)
     gross_spread_usdc = (amount_high - amount_low) / (10**USDC_DECIMALS)
 
-    # Flashloan fee
-    flashloan_fee_usdc = (flashloan_amount_usdc / (10**USDC_DECIMALS)) * (AAVE_FLASHLOAN_FEE_BPS / 10000)
+    # Flashloan fee — apply safety margin to avoid underestimation
+    flashloan_fee_usdc = (
+        (flashloan_amount_usdc / (10**USDC_DECIMALS))
+        * (AAVE_FLASHLOAN_FEE_BPS / 10000)
+        * SAFETY_MARGIN_MULTIPLIER  # 1.5x — accounts for rounding and premium drift
+    )
 
-    # Gas cost in USD
+    # Gas cost in USD — apply safety margin for gas spikes
     gas_cost_eth = gas_cost_wei / (10**18)
-    gas_cost_usd = gas_cost_eth * eth_price_usd
+    gas_cost_usd = gas_cost_eth * eth_price_usd * SAFETY_MARGIN_MULTIPLIER
 
     net_profit = gross_spread_usdc - flashloan_fee_usdc - gas_cost_usd
     return net_profit
@@ -663,20 +684,14 @@ async def scan_and_execute(w3: AsyncWeb3, block_number: int, eth_price_usd: floa
     """
     Core scan loop for a single block.
     Fetches quotes for all tokens across all DEXs, calculates spreads,
-    and executes if profitable.
+    and executes if profitable. Respects route confidence blacklist.
     """
     spreads_found = 0
+    now = time.time()
 
     for symbol, token_info in TOKENS.items():
-        if symbol == "WETH":
-            # Quote WETH→USDC directly
-            token_in = token_info["address"]
-            token_out = USDC_ADDRESS
-        else:
-            # Quote TOKEN→USDC
-            token_in = token_info["address"]
-            token_out = USDC_ADDRESS
-
+        token_in = token_info["address"]
+        token_out = USDC_ADDRESS
         amount_in = token_info["quote_amount"]
 
         # ── Fetch quotes from all DEXs concurrently ──
@@ -698,6 +713,7 @@ async def scan_and_execute(w3: AsyncWeb3, block_number: int, eth_price_usd: floa
             continue
 
         spread_pct = spread["spread_pct"]
+        net_spread_pct = spread["net_spread_pct"]
 
         # Log all spreads > 0.01% to database for charting
         if spread_pct > 0.01:
@@ -712,19 +728,30 @@ async def scan_and_execute(w3: AsyncWeb3, block_number: int, eth_price_usd: floa
                 pass
             spreads_found += 1
 
-        # ── Log significant spreads ──
+        # ── Log significant spreads (show net after flashloan fee) ──
         if spread_pct > 0.05:
             logger.info(
-                f"📊 {symbol}/USDC | Spread: {spread_pct:.3f}% | "
-                f"High: {spread['sell_dex']} ({spread['amount_high']}) | "
-                f"Low: {spread['buy_dex']} ({spread['amount_low']})"
+                f"📊 {symbol}/USDC | Gross: {spread_pct:.3f}% | Net: {net_spread_pct:.3f}% | "
+                f"Sell: {spread['sell_dex']} | Buy: {spread['buy_dex']}"
             )
 
-        # ── Profitability Check ──
-        if spread_pct > 0.08:  # Minimum spread threshold worth evaluating
+        # ── Profitability Check (use NET spread, not gross) ──
+        if net_spread_pct > 0.08:  # Minimum net spread after flashloan fee
+            # ── Route Confidence Check ──
+            route_key = f"{symbol}/{spread['buy_dex']}/{spread['sell_dex']}"
+            if route_key in route_blacklist:
+                if now - route_blacklist[route_key] < ROUTE_COOLDOWN_SECONDS:
+                    logger.debug(f"⏸️ Route {route_key} is blacklisted, skipping")
+                    continue
+                else:
+                    # Cooldown expired — reset
+                    del route_blacklist[route_key]
+                    route_failures.pop(route_key, None)
+                    logger.info(f"🔓 Route {route_key} cooldown expired, re-enabled")
+
             # Calculate optimal trade size
             trade_amount = calculate_optimal_trade_size(
-                amount_in, spread_pct, token_info["decimals"]
+                amount_in, net_spread_pct, token_info["decimals"]
             )
 
             # Estimate gas cost (typical arb tx on Arbitrum ≈ 500k gas)
@@ -732,7 +759,6 @@ async def scan_and_execute(w3: AsyncWeb3, block_number: int, eth_price_usd: floa
             gas_cost_wei = 500_000 * gas_price
 
             # For token→USDC arb, flashloan amount is in USDC
-            # We need to estimate the USDC equivalent of our trade
             # Use the lower quote as a conservative estimate
             flashloan_usdc = spread["amount_low"]
 
@@ -747,7 +773,8 @@ async def scan_and_execute(w3: AsyncWeb3, block_number: int, eth_price_usd: floa
             if net_profit >= MIN_PROFIT_USD:
                 logger.info(
                     f"💰 PROFITABLE: {symbol}/USDC | Net: +${net_profit:.2f} | "
-                    f"Route: {spread['buy_dex']} → {spread['sell_dex']}"
+                    f"Route: {spread['buy_dex']} → {spread['sell_dex']} | "
+                    f"Gross: {spread_pct:.3f}% | Net: {net_spread_pct:.3f}%"
                 )
 
                 # Execute the arbitrage
@@ -764,6 +791,17 @@ async def scan_and_execute(w3: AsyncWeb3, block_number: int, eth_price_usd: floa
 
                 if tx_hash:
                     logger.info(f"✅ Arb executed: {tx_hash}")
+                    # Reset route confidence on success
+                    route_failures.pop(route_key, None)
+                else:
+                    # Track simulation/execution failure
+                    route_failures[route_key] = route_failures.get(route_key, 0) + 1
+                    if route_failures[route_key] >= MAX_ROUTE_FAILURES:
+                        route_blacklist[route_key] = now
+                        logger.warning(
+                            f"🚫 Route {route_key} blacklisted after "
+                            f"{MAX_ROUTE_FAILURES} failures (cooldown: {ROUTE_COOLDOWN_SECONDS}s)"
+                        )
 
     return spreads_found
 
