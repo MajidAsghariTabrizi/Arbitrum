@@ -26,6 +26,7 @@ from decimal import Decimal
 from itertools import combinations
 from typing import Dict, List, Optional, Tuple
 
+import requests as req_sync
 from dotenv import load_dotenv
 from web3 import AsyncWeb3
 from web3.exceptions import ContractLogicError
@@ -52,12 +53,24 @@ logger = logging.getLogger("ArbEngine")
 # ═══════════════════════════════════════════════════════════════════════════════
 load_dotenv()
 
-PRIMARY_RPC = os.getenv("PRIMARY_RPC", os.getenv("RPC_URL", ""))
+# RPC — unified convention: PRIMARY_RPC is the main HTTP endpoint (matches gravity_bot.py)
+PRIMARY_RPC = os.getenv("PRIMARY_RPC")
+if not PRIMARY_RPC:
+    PRIMARY_RPC = os.getenv("RPC_URL", "")
+
+FALLBACK_RPCS = [r.strip() for r in os.getenv("FALLBACK_RPCS", "").split(",") if r.strip()]
+ALL_RPCS = [PRIMARY_RPC] + FALLBACK_RPCS
+current_rpc_idx = 0  # Index into ALL_RPCS
+
 PRIVATE_KEY = os.getenv("PRIVATE_KEY", "")
 DEX_ARBITRAGEUR_ADDRESS = os.getenv("DEX_ARBITRAGEUR_ADDRESS", "")
 
+# Telegram
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+
 if not PRIMARY_RPC:
-    logger.critical("❌ RPC_URL / PRIMARY_RPC not found in .env — exiting")
+    logger.critical("❌ PRIMARY_RPC not found in .env — exiting")
     exit(1)
 
 if not PRIVATE_KEY:
@@ -65,6 +78,24 @@ if not PRIVATE_KEY:
 
 if not DEX_ARBITRAGEUR_ADDRESS or DEX_ARBITRAGEUR_ADDRESS == "0x0000000000000000000000000000000000000000":
     logger.warning("⚠️  DEX_ARBITRAGEUR_ADDRESS not set — deploy contract first, then add to .env")
+
+if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    logger.warning("⚠️  TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set — Telegram alerts disabled")
+
+
+def send_telegram_alert(msg: str):
+    """Send an HTML-formatted Telegram notification (fire-and-forget)."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        req_sync.post(url, json={
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": msg,
+            "parse_mode": "HTML"
+        }, timeout=10)
+    except Exception:
+        pass
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TOKEN CONFIGURATION — Arbitrum Mainnet (Real Addresses)
@@ -580,10 +611,24 @@ async def execute_arbitrage(
             profit_usd=net_profit_usd,
         )
 
+        # Telegram notification
+        send_telegram_alert(
+            f"🔄 <b>Arb Executed</b>\n"
+            f"📊 Pair: <code>{token_symbol}/USDC</code>\n"
+            f"🔀 Route: {buy_dex} → {sell_dex}\n"
+            f"💰 Profit: +${net_profit_usd:.2f}\n"
+            f"🔗 <a href='https://arbiscan.io/tx/{tx_hash_hex}'>Arbiscan</a>"
+        )
+
         return tx_hash_hex
 
     except Exception as e:
         logger.error(f"❌ Execution failed for {token_symbol}: {e}")
+        send_telegram_alert(
+            f"⚠️ <b>Arb Execution Failed</b>\n"
+            f"📊 <code>{token_symbol}/USDC</code>\n"
+            f"<code>{e}</code>"
+        )
         return None
 
 
@@ -719,18 +764,21 @@ async def scan_and_execute(w3: AsyncWeb3, block_number: int, eth_price_usd: floa
 
 
 async def main():
-    """Main entry point — continuous block-by-block scanning."""
+    """Main entry point — continuous block-by-block scanning with RPC failover."""
+    global current_rpc_idx
+
     logger.info("═══════════════════════════════════════════════════════════")
     logger.info("🛸 ANTI-GRAVITY — DEX Arbitrage Engine v2.0")
     logger.info("═══════════════════════════════════════════════════════════")
-    logger.info(f"🔗 RPC: {PRIMARY_RPC[:50]}...")
+    logger.info(f"🔗 Primary RPC: {PRIMARY_RPC[:50]}...")
+    logger.info(f"🔗 Fallback RPCs: {len(FALLBACK_RPCS)} configured")
     logger.info(f"📊 Scanning {len(TOKENS)} tokens across {len(DEXES)} DEXs")
     logger.info(f"🎯 Tokens: {', '.join(TOKENS.keys())}")
     logger.info(f"🏪 DEXs: {', '.join(DEXES.keys())}")
     logger.info(f"💰 Min Profit: ${MIN_PROFIT_USD}")
     logger.info("═══════════════════════════════════════════════════════════")
 
-    w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(PRIMARY_RPC))
+    w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(ALL_RPCS[current_rpc_idx]))
 
     if not await w3.is_connected():
         logger.critical("❌ Failed to connect to RPC — exiting")
@@ -746,9 +794,17 @@ async def main():
     db_manager.init_db()
     logger.info("✅ Database initialized")
 
+    # Telegram startup notification
+    send_telegram_alert(
+        f"🔄 <b>DEX Arb Engine Started</b>\n"
+        f"📊 {len(TOKENS)} tokens × {len(DEXES)} DEXs\n"
+        f"🔗 RPC: <code>{ALL_RPCS[current_rpc_idx][:40]}...</code>"
+    )
+
     last_block = 0
     eth_price_usd = await get_eth_price(w3)
     eth_price_refresh = time.time()
+    consecutive_errors = 0
     logger.info(f"📈 ETH Price: ${eth_price_usd:,.0f}")
 
     # ── Infinite Scan Loop ──
@@ -756,6 +812,9 @@ async def main():
         try:
             scan_start = time.time()
             current_block = await w3.eth.block_number
+
+            # Reset error counter on success
+            consecutive_errors = 0
 
             # Skip if same block
             if current_block <= last_block:
@@ -790,8 +849,31 @@ async def main():
             logger.info("⏹️  Shutting down gracefully...")
             break
         except Exception as e:
-            logger.error(f"❌ Loop error: {e}")
+            consecutive_errors += 1
+            err_str = str(e).lower()
+            is_rpc_error = any(x in err_str for x in ["429", "403", "rate", "forbidden", "timeout", "connection"])
+
+            logger.error(f"❌ Loop error (#{consecutive_errors}): {e}")
             logger.debug(traceback.format_exc())
+
+            # ── RPC Failover on 3 consecutive errors ──
+            if is_rpc_error and consecutive_errors >= 3 and len(ALL_RPCS) > 1:
+                old_idx = current_rpc_idx
+                current_rpc_idx = (current_rpc_idx + 1) % len(ALL_RPCS)
+                new_rpc = ALL_RPCS[current_rpc_idx]
+                logger.warning(f"🔄 3 strikes! Switching RPC [{old_idx+1}→{current_rpc_idx+1}/{len(ALL_RPCS)}]: {new_rpc[:40]}...")
+                w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(new_rpc))
+                consecutive_errors = 0
+                send_telegram_alert(
+                    f"⚠️ <b>Arb Engine RPC Failover</b>\n"
+                    f"🔄 Switched to: <code>{new_rpc[:40]}...</code>"
+                )
+            elif consecutive_errors >= 10:
+                send_telegram_alert(
+                    f"🆘 <b>Arb Engine: {consecutive_errors} consecutive errors</b>\n"
+                    f"<code>{e}</code>"
+                )
+
             await asyncio.sleep(3)
 
 
