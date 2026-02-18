@@ -23,7 +23,7 @@ import logging
 import time
 import traceback
 from decimal import Decimal
-from itertools import combinations
+from itertools import permutations
 from typing import Dict, List, Optional, Tuple
 
 import requests as req_sync
@@ -31,6 +31,7 @@ from dotenv import load_dotenv
 from web3 import AsyncWeb3
 from web3.exceptions import ContractLogicError
 from eth_abi import encode
+from hexbytes import HexBytes
 
 import db_manager
 
@@ -101,46 +102,21 @@ def send_telegram_alert(msg: str):
 # TOKEN CONFIGURATION — Arbitrum Mainnet (Real Addresses)
 # ═══════════════════════════════════════════════════════════════════════════════
 TOKENS: Dict[str, dict] = {
-    "WETH": {
-        "address": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
-        "decimals": 18,
-        "quote_amount": 5 * 10**17,            # 0.5 WETH (~$1250)
-    },
-    "ARB": {
-        "address": "0x912CE59144191C1204E64559FE8253a0e49E6548",
-        "decimals": 18,
-        "quote_amount": 1000 * 10**18,          # 1000 ARB (~$1000)
-    },
-    "MAGIC": {
-        "address": "0x539bdE0d7Dbd33f84E8aaf9084C942D9800Ef002",
-        "decimals": 18,
-        "quote_amount": 1500 * 10**18,           # 1500 MAGIC (~$750)
-    },
-    "GRAIL": {
-        "address": "0x3d9907F9a368ad0a51Be60f7Da3b97cf940982D8",
-        "decimals": 18,
-        "quote_amount": 3 * 10**18,              # 3 GRAIL (~$600)
-    },
-    "PENDLE": {
-        "address": "0x0c880f6761F1af8d9Aa9C466984785263cf79560",
-        "decimals": 18,
-        "quote_amount": 200 * 10**18,            # 200 PENDLE (~$700)
-    },
-    "GMX": {
-        "address": "0xfc5A1A6EB076a2C7AD06EDb220f4daaC9AF172af",
-        "decimals": 18,
-        "quote_amount": 20 * 10**18,             # 20 GMX (~$600)
-    },
-    "RDNT": {
-        "address": "0x3082CC23568eA640225c2467653dB90e9250AaA0",
-        "decimals": 18,
-        "quote_amount": 10000 * 10**18,           # 10000 RDNT (~$500)
-    },
+    "WETH":   {"address": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1", "decimals": 18},
+    "ARB":    {"address": "0x912CE59144191C1204E64559FE8253a0e49E6548", "decimals": 18},
+    "MAGIC":  {"address": "0x539bdE0d7Dbd33f84E8aaf9084C942D9800Ef002", "decimals": 18},
+    "GRAIL":  {"address": "0x3d9907F9a368ad0a51Be60f7Da3b97cf940982D8", "decimals": 18},
+    "PENDLE": {"address": "0x0c880f6761F1af8d9Aa9C466984785263cf79560", "decimals": 18},
+    "GMX":    {"address": "0xfc5A1A6EB076a2C7AD06EDb220f4daaC9AF172af", "decimals": 18},
+    "RDNT":   {"address": "0x3082CC23568eA640225c2467653dB90e9250AaA0", "decimals": 18},
 }
 
 # Base quote token
 USDC_ADDRESS = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"  # Native USDC (Arbitrum)
 USDC_DECIMALS = 6
+
+# Fixed flashloan size in USDC (6 decimals). $1000 USDC = 1_000_000_000
+FLASHLOAN_USDC_AMOUNT = 1000 * 10**USDC_DECIMALS  # $1,000
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # DEX CONFIGURATION — Arbitrum Mainnet (Real Addresses)
@@ -280,6 +256,7 @@ MAX_GAS_PRICE_GWEI = 1.0          # Arbitrum gas is cheap, but cap it
 SCAN_COOLDOWN_SECONDS = 0.5       # Minimum time between scans
 MAX_SLIPPAGE_BPS = 50             # 0.5% max slippage for trade sizing
 SAFETY_MARGIN_MULTIPLIER = 1.5    # Extra margin on cost estimates to avoid NotProfitable
+LEG_A_SLIPPAGE_BPS = 50           # 0.5% slippage tolerance on Leg A output
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ROUTE CONFIDENCE — Tracks simulation failures per route
@@ -287,8 +264,8 @@ SAFETY_MARGIN_MULTIPLIER = 1.5    # Extra margin on cost estimates to avoid NotP
 # ═══════════════════════════════════════════════════════════════════════════════
 MAX_ROUTE_FAILURES = 3            # After 3 sim failures, skip route
 ROUTE_COOLDOWN_SECONDS = 600      # 10-minute cooldown after blacklist
-route_failures: Dict[str, int] = {}     # "TOKEN/buy_dex/sell_dex" -> failure count
-route_blacklist: Dict[str, float] = {}  # "TOKEN/buy_dex/sell_dex" -> blacklist timestamp
+route_failures: Dict[str, int] = {}     # "TOKEN/dex_a/dex_b" -> failure count
+route_blacklist: Dict[str, float] = {}  # "TOKEN/dex_a/dex_b" -> blacklist timestamp
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # QUOTE FETCHING
@@ -318,8 +295,7 @@ async def get_v3_quote(
             )
         ).call()
         return result[0]  # amountOut
-    except (ContractLogicError, Exception) as e:
-        # Pool may not exist for this fee tier — silently skip
+    except (ContractLogicError, Exception):
         return None
 
 
@@ -358,135 +334,95 @@ async def get_best_quote_for_dex(
     """
     Get the best quote across all fee tiers for a given DEX.
     Returns the highest amountOut, or None if all fee tiers fail.
+    Uses asyncio.gather for concurrent fee tier queries.
     """
-    best_quote = None
-
     if dex_config["type"] == "v3":
-        # Try all fee tiers, keep the best
-        for fee in dex_config["fee_tiers"]:
-            quote = await get_v3_quote(
-                w3, dex_config["quoter"], token_in, token_out, amount_in, fee
-            )
-            if quote is not None and (best_quote is None or quote > best_quote):
-                best_quote = quote
+        # Fire all fee-tier quotes concurrently
+        tasks = [
+            get_v3_quote(w3, dex_config["quoter"], token_in, token_out, amount_in, fee)
+            for fee in dex_config["fee_tiers"]
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        valid = [r for r in results if isinstance(r, int) and r > 0]
+        return max(valid) if valid else None
 
     elif dex_config["type"] == "algebra":
-        # Algebra quoters don't use fee tiers — single call
-        best_quote = await get_algebra_quote(
+        return await get_algebra_quote(
             w3, dex_config["quoter"], token_in, token_out, amount_in
         )
 
-    return best_quote
+    return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SPREAD CALCULATION
+# SEQUENTIAL A→B ROUTE QUOTING
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def calculate_spread(
-    quotes: Dict[str, int],
-    amount_in: int,
-    token_decimals: int,
+async def quote_sequential_route(
+    w3: AsyncWeb3,
+    token_address: str,
+    dex_a_name: str,
+    dex_a_config: dict,
+    dex_b_name: str,
+    dex_b_config: dict,
+    flashloan_usdc: int,
 ) -> Optional[dict]:
     """
-    Given quotes from multiple DEXs for the same pair & direction,
-    find the max spread between any two DEXs.
+    Simulate the EXACT two-leg arb route:
+      Leg A: USDC → TOKEN on DEX_A  (buy token)
+      Leg B: TOKEN → USDC on DEX_B  (sell token using exact Leg A output)
 
-    The spread is the GROSS spread. The caller must subtract
-    flashloan fees + gas to get net profit.
-
-    Returns: {sell_dex, buy_dex, spread_pct, amount_high, amount_low,
-              net_spread_pct} or None
+    Returns route info if Leg B produces more USDC than the flashloan,
+    otherwise None.
     """
-    valid = {k: v for k, v in quotes.items() if v is not None and v > 0}
-    if len(valid) < 2:
+    # ── Leg A: USDC → TOKEN (buy on DEX_A) ──
+    leg_a_out = await get_best_quote_for_dex(
+        w3, dex_a_name, dex_a_config,
+        USDC_ADDRESS, token_address,
+        flashloan_usdc,
+    )
+    if not leg_a_out or leg_a_out == 0:
         return None
 
-    dex_high = max(valid, key=valid.get)
-    dex_low = min(valid, key=valid.get)
-
-    high_val = valid[dex_high]
-    low_val = valid[dex_low]
-
-    if low_val == 0:
+    # ── Leg B: TOKEN → USDC (sell exact Leg A output on DEX_B) ──
+    leg_b_out = await get_best_quote_for_dex(
+        w3, dex_b_name, dex_b_config,
+        token_address, USDC_ADDRESS,
+        leg_a_out,     # <-- exact tokens received from Leg A
+    )
+    if not leg_b_out or leg_b_out == 0:
         return None
 
-    gross_spread_pct = ((high_val - low_val) / low_val) * 100.0
-
-    # Net spread after Aave flashloan fee (0.05%) — the REAL number
-    flashloan_fee_pct = AAVE_FLASHLOAN_FEE_BPS / 100.0  # 0.05%
-    net_spread_pct = gross_spread_pct - flashloan_fee_pct
+    # ── Profitability: Is Leg B output > flashloan + Aave fee? ──
+    flashloan_fee = (flashloan_usdc * AAVE_FLASHLOAN_FEE_BPS) // 10000
+    total_repay = flashloan_usdc + flashloan_fee
+    gross_profit_raw = leg_b_out - total_repay  # In USDC raw (6 decimals)
+    gross_profit_usd = gross_profit_raw / (10 ** USDC_DECIMALS)
 
     return {
-        "sell_dex": dex_high,    # Higher output → sell here
-        "buy_dex": dex_low,      # Lower output → buy here (token cheaper)
-        "spread_pct": gross_spread_pct,
-        "net_spread_pct": net_spread_pct,
-        "amount_high": high_val,
-        "amount_low": low_val,
-        # Legacy keys for backward compat
-        "dex_high": dex_high,
-        "dex_low": dex_low,
+        "dex_a": dex_a_name,         # Buy leg
+        "dex_b": dex_b_name,         # Sell leg
+        "flashloan_usdc": flashloan_usdc,
+        "leg_a_token_out": leg_a_out, # Exact intermediate token amount
+        "leg_b_usdc_out": leg_b_out,  # Final USDC returned
+        "total_repay": total_repay,   # Flashloan + fee
+        "gross_profit_raw": gross_profit_raw,
+        "gross_profit_usd": gross_profit_usd,
     }
 
 
-def calculate_optimal_trade_size(
-    base_amount: int,
-    spread_pct: float,
-    token_decimals: int,
-) -> int:
-    """
-    Basic optimal trade sizing to avoid excessive price impact.
-    If spread is thin, reduce trade size proportionally.
-    If spread is fat, use full size.
-    """
-    if spread_pct <= 0.1:
-        # Very thin spread — use 10% of base amount
-        return base_amount // 10
-    elif spread_pct <= 0.3:
-        # Moderate spread — use 30%
-        return (base_amount * 30) // 100
-    elif spread_pct <= 0.5:
-        # Decent spread — use 50%
-        return base_amount // 2
-    elif spread_pct <= 1.0:
-        # Good spread — use 75%
-        return (base_amount * 75) // 100
-    else:
-        # Fat spread — use full amount
-        return base_amount
-
-
 def estimate_net_profit_usd(
-    amount_high: int,
-    amount_low: int,
-    flashloan_amount_usdc: int,
+    gross_profit_usd: float,
     gas_cost_wei: int,
     eth_price_usd: float,
 ) -> float:
     """
-    Conservative net profit calculation.
-    Deducts:
-      1. Aave flashloan fee (0.05%) with safety multiplier
-      2. Gas cost with safety multiplier
-    The spread itself already accounts for DEX swap fees (embedded in quotes).
+    Net profit after gas costs with safety margin.
+    Flashloan fee is already deducted in gross_profit_usd.
     """
-    # Gross spread in USDC terms (6 decimals)
-    gross_spread_usdc = (amount_high - amount_low) / (10**USDC_DECIMALS)
-
-    # Flashloan fee — apply safety margin to avoid underestimation
-    flashloan_fee_usdc = (
-        (flashloan_amount_usdc / (10**USDC_DECIMALS))
-        * (AAVE_FLASHLOAN_FEE_BPS / 10000)
-        * SAFETY_MARGIN_MULTIPLIER  # 1.5x — accounts for rounding and premium drift
-    )
-
-    # Gas cost in USD — apply safety margin for gas spikes
-    gas_cost_eth = gas_cost_wei / (10**18)
+    gas_cost_eth = gas_cost_wei / (10 ** 18)
     gas_cost_usd = gas_cost_eth * eth_price_usd * SAFETY_MARGIN_MULTIPLIER
-
-    net_profit = gross_spread_usdc - flashloan_fee_usdc - gas_cost_usd
-    return net_profit
+    return gross_profit_usd - gas_cost_usd
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -535,14 +471,20 @@ async def execute_arbitrage(
     w3: AsyncWeb3,
     token_symbol: str,
     token_address: str,
-    buy_dex: str,
-    sell_dex: str,
-    trade_amount: int,
-    amount_out_min: int,
+    dex_a: str,
+    dex_b: str,
+    flashloan_usdc: int,
+    leg_a_token_out: int,
+    leg_b_usdc_out: int,
     net_profit_usd: float,
 ) -> Optional[str]:
     """
     Build, simulate, and broadcast an arbitrage transaction.
+
+    Uses EXACT amounts from sequential quoting:
+      - Leg A: USDC → TOKEN on dex_a, expects `leg_a_token_out` tokens
+      - Leg B: TOKEN → USDC on dex_b, swaps exactly `leg_a_token_out` tokens
+
     Returns tx_hash on success, None on failure.
     """
     if not DEX_ARBITRAGEUR_ADDRESS or not PRIVATE_KEY:
@@ -556,64 +498,73 @@ async def execute_arbitrage(
             abi=ARB_CONTRACT_ABI,
         )
 
-        buy_config = DEXES[buy_dex]
-        sell_config = DEXES[sell_dex]
+        buy_config = DEXES[dex_a]
+        sell_config = DEXES[dex_b]
 
-        # Build swap calldata for both legs
-        # Leg A: USDC → Token (buy on cheaper DEX)
+        # ── Leg A calldata: USDC → Token (buy on dex_a) ──
+        # amount_in  = flashloan_usdc (exact USDC from flashloan)
+        # amount_out_min = leg_a_token_out minus 0.5% slippage
+        leg_a_min_out = leg_a_token_out * (10000 - LEG_A_SLIPPAGE_BPS) // 10000
+
         data_a = build_v3_swap_calldata(
             w3,
             USDC_ADDRESS,
             token_address,
-            500,  # 0.05% fee tier (most liquid for majors)
+            500,  # 0.05% fee tier (most liquid)
             DEX_ARBITRAGEUR_ADDRESS,
-            trade_amount,
-            0,    # amountOutMin handled by profitability check in contract
+            flashloan_usdc,     # Exact USDC input
+            leg_a_min_out,      # Minimum tokens expected (with slippage)
         )
 
-        # Leg B: Token → USDC (sell on more expensive DEX)
+        # ── Leg B calldata: Token → USDC (sell on dex_b) ──
+        # amount_in = leg_a_token_out (exact tokens from Leg A quote)
+        # amount_out_min = flashloan + fee (must at least repay the loan)
+        flashloan_fee = (flashloan_usdc * AAVE_FLASHLOAN_FEE_BPS) // 10000
+        min_usdc_repay = flashloan_usdc + flashloan_fee
+
         data_b = build_v3_swap_calldata(
             w3,
             token_address,
             USDC_ADDRESS,
             500,
             DEX_ARBITRAGEUR_ADDRESS,
-            0,    # Will use full intermediate balance in contract
-            amount_out_min,
+            leg_a_token_out,    # ← EXACT token amount, NEVER zero
+            min_usdc_repay,     # Must repay flashloan + premium
         )
 
-        # Encode ArbParams struct
-        # All `bytes` fields must be raw bytes (not hex strings)
-        # All `address` fields must be checksummed
-        arb_params = encode(
+        # ── Encode ArbParams struct ──
+        arb_params = HexBytes(encode(
             ["(address,bytes,address,bytes,address)"],
             [(
                 w3.to_checksum_address(buy_config["router"]),
-                bytes(data_a),   # ensure bytes type
+                bytes(data_a),
                 w3.to_checksum_address(sell_config["router"]),
-                bytes(data_b),   # ensure bytes type
+                bytes(data_b),
                 w3.to_checksum_address(token_address),
             )]
-        )
+        ))
 
-        # Build the flashloan transaction
+        # ── Build flashloan transaction ──
         nonce = await w3.eth.get_transaction_count(account.address)
         gas_price = await w3.eth.gas_price
 
         tx = await contract.functions.requestFlashLoan(
             w3.to_checksum_address(USDC_ADDRESS),
-            trade_amount,
-            bytes(arb_params),  # Explicit bytes — prevents ByteStringEncoder error
+            flashloan_usdc,
+            arb_params,  # HexBytes — correct type for ByteStringEncoder
         ).build_transaction({
             "from": account.address,
             "nonce": nonce,
-            "gas": 800_000,  # Conservative gas limit for flashloan + 2 swaps
+            "gas": 800_000,
             "maxFeePerGas": gas_price * 2,
             "maxPriorityFeePerGas": w3.to_wei(0.01, "gwei"),
         })
 
         # ── Simulation Shield: eth_call before broadcast ──
-        logger.info(f"🧪 Simulating arb: {token_symbol}/USDC | {buy_dex}→{sell_dex}")
+        logger.info(
+            f"🧪 Simulating arb: {token_symbol}/USDC | {dex_a}→{dex_b} | "
+            f"Leg A out: {leg_a_token_out} tokens | Leg B out: {leg_b_usdc_out} USDC raw"
+        )
         try:
             await w3.eth.call(tx)
             logger.info(f"✅ Simulation passed for {token_symbol}")
@@ -632,8 +583,8 @@ async def execute_arbitrage(
         db_manager.record_arb_execution(
             tx_hash=tx_hash_hex,
             token_pair=f"{token_symbol}/USDC",
-            dex_a=buy_dex,
-            dex_b=sell_dex,
+            dex_a=dex_a,
+            dex_b=dex_b,
             profit_usd=net_profit_usd,
         )
 
@@ -641,7 +592,7 @@ async def execute_arbitrage(
         send_telegram_alert(
             f"🔄 <b>Arb Executed</b>\n"
             f"📊 Pair: <code>{token_symbol}/USDC</code>\n"
-            f"🔀 Route: {buy_dex} → {sell_dex}\n"
+            f"🔀 Route: {dex_a} → {dex_b}\n"
             f"💰 Profit: +${net_profit_usd:.2f}\n"
             f"🔗 <a href='https://arbiscan.io/tx/{tx_hash_hex}'>Arbiscan</a>"
         )
@@ -674,7 +625,7 @@ async def get_eth_price(w3: AsyncWeb3) -> float:
             500,     # 0.05% pool
         )
         if quote:
-            return quote / (10**USDC_DECIMALS)
+            return quote / (10 ** USDC_DECIMALS)
     except Exception:
         pass
     return 2500.0  # Fallback estimate
@@ -682,90 +633,94 @@ async def get_eth_price(w3: AsyncWeb3) -> float:
 
 async def scan_and_execute(w3: AsyncWeb3, block_number: int, eth_price_usd: float):
     """
-    Core scan loop for a single block.
-    Fetches quotes for all tokens across all DEXs, calculates spreads,
-    and executes if profitable. Respects route confidence blacklist.
+    Core scan loop for one block.
+
+    For each token, for each ORDERED permutation of (DEX_A, DEX_B):
+      1. Quote USDC → TOKEN on DEX_A  (Leg A — buy)
+      2. Quote TOKEN → USDC on DEX_B  (Leg B — sell, using Leg A's exact output)
+      3. If Leg B output > flashloan + fees → it's a real opportunity
+
+    Uses asyncio.gather to run all route quotes concurrently per token.
+    Respects route confidence blacklist.
     """
     spreads_found = 0
     now = time.time()
+    dex_names = list(DEXES.keys())
 
     for symbol, token_info in TOKENS.items():
-        token_in = token_info["address"]
-        token_out = USDC_ADDRESS
-        amount_in = token_info["quote_amount"]
+        token_address = token_info["address"]
 
-        # ── Fetch quotes from all DEXs concurrently ──
-        quote_tasks = {}
-        for dex_name, dex_config in DEXES.items():
-            quote_tasks[dex_name] = get_best_quote_for_dex(
-                w3, dex_name, dex_config, token_in, token_out, amount_in
-            )
+        # ── Build tasks for every ordered DEX pair (permutations, not combos) ──
+        route_tasks = []
+        route_keys = []
+        for dex_a_name, dex_b_name in permutations(dex_names, 2):
+            route_key = f"{symbol}/{dex_a_name}/{dex_b_name}"
 
-        # Await all quotes in parallel
-        results = {}
-        for dex_name, task in quote_tasks.items():
-            results[dex_name] = await task
-
-        # ── Calculate spread ──
-        spread = calculate_spread(results, amount_in, token_info["decimals"])
-
-        if spread is None:
-            continue
-
-        spread_pct = spread["spread_pct"]
-        net_spread_pct = spread["net_spread_pct"]
-
-        # Log all spreads > 0.01% to database for charting
-        if spread_pct > 0.01:
-            try:
-                db_manager.log_arb_spread(
-                    token_pair=f"{symbol}/USDC",
-                    dex_a=spread["sell_dex"],
-                    dex_b=spread["buy_dex"],
-                    spread_percent=round(spread_pct, 4),
-                )
-            except Exception:
-                pass
-            spreads_found += 1
-
-        # ── Log significant spreads (show net after flashloan fee) ──
-        if spread_pct > 0.05:
-            logger.info(
-                f"📊 {symbol}/USDC | Gross: {spread_pct:.3f}% | Net: {net_spread_pct:.3f}% | "
-                f"Sell: {spread['sell_dex']} | Buy: {spread['buy_dex']}"
-            )
-
-        # ── Profitability Check (use NET spread, not gross) ──
-        if net_spread_pct > 0.08:  # Minimum net spread after flashloan fee
-            # ── Route Confidence Check ──
-            route_key = f"{symbol}/{spread['buy_dex']}/{spread['sell_dex']}"
+            # Skip blacklisted routes
             if route_key in route_blacklist:
                 if now - route_blacklist[route_key] < ROUTE_COOLDOWN_SECONDS:
-                    logger.debug(f"⏸️ Route {route_key} is blacklisted, skipping")
                     continue
                 else:
-                    # Cooldown expired — reset
                     del route_blacklist[route_key]
                     route_failures.pop(route_key, None)
                     logger.info(f"🔓 Route {route_key} cooldown expired, re-enabled")
 
-            # Calculate optimal trade size
-            trade_amount = calculate_optimal_trade_size(
-                amount_in, net_spread_pct, token_info["decimals"]
+            route_tasks.append(
+                quote_sequential_route(
+                    w3, token_address,
+                    dex_a_name, DEXES[dex_a_name],
+                    dex_b_name, DEXES[dex_b_name],
+                    FLASHLOAN_USDC_AMOUNT,
+                )
             )
+            route_keys.append(route_key)
 
-            # Estimate gas cost (typical arb tx on Arbitrum ≈ 500k gas)
+        if not route_tasks:
+            continue
+
+        # ── Fire all route quotes concurrently via asyncio.gather ──
+        route_results = await asyncio.gather(*route_tasks, return_exceptions=True)
+
+        # ── Evaluate results ──
+        for route_key, result in zip(route_keys, route_results):
+            if isinstance(result, Exception) or result is None:
+                continue
+
+            gross_profit_usd = result["gross_profit_usd"]
+            spread_pct = (result["gross_profit_raw"] / FLASHLOAN_USDC_AMOUNT) * 100.0 if FLASHLOAN_USDC_AMOUNT > 0 else 0
+
+            # Log all meaningful spreads to DB for charting
+            if spread_pct > 0.01:
+                try:
+                    db_manager.log_arb_spread(
+                        token_pair=f"{symbol}/USDC",
+                        dex_a=result["dex_a"],
+                        dex_b=result["dex_b"],
+                        spread_percent=round(spread_pct, 4),
+                    )
+                except Exception:
+                    pass
+                spreads_found += 1
+
+            # Log significant spreads
+            if spread_pct > 0.05:
+                logger.info(
+                    f"📊 {symbol}/USDC | {result['dex_a']}→{result['dex_b']} | "
+                    f"Spread: {spread_pct:.3f}% | Gross: ${gross_profit_usd:.2f} | "
+                    f"Tokens: {result['leg_a_token_out']} | "
+                    f"USDC out: {result['leg_b_usdc_out']}"
+                )
+
+            # ── Profitability gate ──
+            if gross_profit_usd <= 0:
+                continue
+
+            # Estimate gas cost
             gas_price = await w3.eth.gas_price
             gas_cost_wei = 500_000 * gas_price
 
-            # For token→USDC arb, flashloan amount is in USDC
-            # Use the lower quote as a conservative estimate
-            flashloan_usdc = spread["amount_low"]
-
             net_profit = estimate_net_profit_usd(
-                spread["amount_high"],
-                spread["amount_low"],
-                flashloan_usdc,
+                gross_profit_usd,
                 gas_cost_wei,
                 eth_price_usd,
             )
@@ -773,28 +728,27 @@ async def scan_and_execute(w3: AsyncWeb3, block_number: int, eth_price_usd: floa
             if net_profit >= MIN_PROFIT_USD:
                 logger.info(
                     f"💰 PROFITABLE: {symbol}/USDC | Net: +${net_profit:.2f} | "
-                    f"Route: {spread['buy_dex']} → {spread['sell_dex']} | "
-                    f"Gross: {spread_pct:.3f}% | Net: {net_spread_pct:.3f}%"
+                    f"Route: {result['dex_a']} → {result['dex_b']} | "
+                    f"Tokens mid: {result['leg_a_token_out']} | "
+                    f"USDC in: {FLASHLOAN_USDC_AMOUNT} | USDC out: {result['leg_b_usdc_out']}"
                 )
 
-                # Execute the arbitrage
                 tx_hash = await execute_arbitrage(
                     w3=w3,
                     token_symbol=symbol,
-                    token_address=token_info["address"],
-                    buy_dex=spread["buy_dex"],
-                    sell_dex=spread["sell_dex"],
-                    trade_amount=trade_amount,
-                    amount_out_min=flashloan_usdc,  # Minimum to repay flashloan
+                    token_address=token_address,
+                    dex_a=result["dex_a"],
+                    dex_b=result["dex_b"],
+                    flashloan_usdc=FLASHLOAN_USDC_AMOUNT,
+                    leg_a_token_out=result["leg_a_token_out"],
+                    leg_b_usdc_out=result["leg_b_usdc_out"],
                     net_profit_usd=net_profit,
                 )
 
                 if tx_hash:
                     logger.info(f"✅ Arb executed: {tx_hash}")
-                    # Reset route confidence on success
                     route_failures.pop(route_key, None)
                 else:
-                    # Track simulation/execution failure
                     route_failures[route_key] = route_failures.get(route_key, 0) + 1
                     if route_failures[route_key] >= MAX_ROUTE_FAILURES:
                         route_blacklist[route_key] = now
