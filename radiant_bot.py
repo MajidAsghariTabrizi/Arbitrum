@@ -613,7 +613,7 @@ class RadiantBot:
         calls = []
         for user in targets:
             call_data = self.pool.functions.getUserAccountData(user)._encode_transaction_data()
-            calls.append((POOL_ADDRESS, call_data))
+            calls.append((self.pool.address, call_data))
 
         try:
             _, return_data = await self.multicall.functions.aggregate(calls).call()

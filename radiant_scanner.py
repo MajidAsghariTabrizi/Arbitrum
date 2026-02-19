@@ -216,18 +216,16 @@ def save_targets_atomic(targets_data):
 def classify_targets_multicall(all_users_list):
     w3 = rpc_manager.w3
     
-    # Dynamic Pool Fetch
-    pool_address = POOL_ADDRESS # Wait, user said remove hardcoded POOL_ADDRESS.
-    # User said: In classify_targets_multicall, instantiate the addresses_provider and dynamically fetch POOL_ADDRESS
-    
+    # 1. Fetch dynamic pool address first
     addresses_provider = w3.eth.contract(address=POOL_ADDRESSES_PROVIDER, abi=ADDRESSES_PROVIDER_ABI)
     try:
-         pool_address = rpc_manager.call(addresses_provider.functions.getLendingPool().call)
+        dynamic_pool_address = rpc_manager.call(addresses_provider.functions.getLendingPool().call)
     except Exception as e:
-         print(f"❌ Failed to fetch POOL address: {e}")
-         return {"tier_1_danger": [], "tier_2_watchlist": []}
+        print(f"  ❌ Failed to fetch dynamic Pool Address: {e}")
+        return {"tier_1_danger": [], "tier_2_watchlist": []}
 
-    pool = w3.eth.contract(address=pool_address, abi=POOL_ABI)
+    # 2. Instantiate pool with dynamic address
+    pool = w3.eth.contract(address=dynamic_pool_address, abi=POOL_ABI)
     multicall = w3.eth.contract(address=MULTICALL3_ADDRESS, abi=MULTICALL3_ABI)
     tier_1 = []
     tier_2 = []
@@ -239,17 +237,18 @@ def classify_targets_multicall(all_users_list):
         for user in batch:
             try:
                 call_data = pool.functions.getUserAccountData(Web3.to_checksum_address(user))._encode_transaction_data()
-                calls.append((pool_address, call_data))
+                calls.append((dynamic_pool_address, call_data)) # <--- FIXED HERE
             except Exception:
                 continue
+            
         if not calls:
             continue
+        
         try:
             _, return_data = rpc_manager.call(multicall.functions.aggregate(calls).call)
         except Exception as e:
             print(f"  ⚠️ Multicall batch failed: {e}")
             continue
-
         for i, raw_bytes in enumerate(return_data):
             user = batch[i]
             try:
@@ -268,9 +267,9 @@ def classify_targets_multicall(all_users_list):
             except Exception:
                 discarded += 1
                 continue
+            
         time.sleep(0.5)
         print(f"  📊 Classified {min(batch_start + MULTICALL_BATCH_SIZE, len(all_users_list))}/{len(all_users_list)} | T1: {len(tier_1)} | T2: {len(tier_2)}", end="\r")
-
     return {"tier_1_danger": tier_1, "tier_2_watchlist": tier_2}
 
 def scan_debt_tokens():
