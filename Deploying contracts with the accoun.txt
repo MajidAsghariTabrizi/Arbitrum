@@ -1,0 +1,68 @@
+Deploying contracts with the account: 0x7a766f3f610cb8c334dE4ECD58b466Ed7BD7DdF7
+
+FlashLoanLiquidator deployed to: 0xfd33aF64939ca21889a052Ef934ed3774963B9F9
+
+
+cat targets.json | jq '{Tier1_Danger: .tier_1_danger | length, Tier2_Watchlist: .tier_2_watchlist | length}'
+ORDIbehesht1370#+
+
+git fetch --all
+git reset --hard origin/main
+
+git add .
+
+git commit -m "radiant"
+
+git push
+
+scp .env root@185.215.244.70:/root/Arbitrum/
+
+
+
+┌────┬────────────────────┬──────────┬──────┬───────────┬──────────┬──────────┐
+│ id │ name               │ mode     │ ↺    │ status    │ cpu      │ memory   │    
+├────┼────────────────────┼──────────┼──────┼───────────┼──────────┼──────────┤    
+│ 6  │ ArbEngine          │ fork     │ 9    │ online    │ 0%       │ 8.3mb    │    
+│ 0  │ ArbitrumBot        │ fork     │ 8355 │ online    │ 0%       │ 40.3mb   │    
+│ 2  │ Dashboard          │ fork     │ 36   │ online    │ 0%       │ 32.8mb   │    
+│ 8  │ RadiantBot         │ fork     │ 15   │ online    │ 0%       │ 13.6mb   │    
+│ 7  │ RadiantScanner     │ fork     │ 15   │ online    │ 0%       │ 13.9mb   │    
+│ 4  │ Scanner            │ fork     │ 80   │ online    │ 0%       │ 15.1mb   │    
+└────┴────────────────────┴──────────┴──────┴───────────┴──────────┴──────────┘ 
+
+═══════════════════════════════════════════════════════════
+🛸 ANTI-GRAVITY — DexArbitrageur Deployment
+═══════════════════════════════════════════════════════════
+📍 Deployer:  0x7a766f3f610cb8c334dE4ECD58b466Ed7BD7DdF7
+💰 Balance:   0.023548370180164 ETH
+───────────────────────────────────────────────────────────
+🏦 Aave V3 Provider: 0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb
+🚀 Deploying DexArbitrageur...
+
+═══════════════════════════════════════════════════════════
+✅ DexArbitrageur deployed to: 0xe141Dc0ac3984A1ea7c0E819149eDCAcCF7ec5CE
+═══════════════════════════════════════════════════════════
+
+📋 Add this to your .env file:
+   DEX_ARBITRAGEUR_ADDRESS=0xe141Dc0ac3984A1ea7c0E819149eDCAcCF7ec5CE
+
+⏳ Waiting for 5 block confirmations...
+🔗 Verifying contract on Arbiscan...
+⚠️  Verification failed: You are trying to verify a contract in 'arbitrumOne', but no APPI token was found for this network. Please provide one in your hardhat config. For example:
+
+{
+  ...
+  etherscan: {
+    apiKey: {
+      arbitrumOne: 'your API key'
+    }
+  }
+}
+
+See https://etherscan.io/apis
+   You can verify manually later with:
+   npx hardhat verify --network arbitrum 0xe141Dc0ac3984A1ea7c0E819149eDCAcCF7ec5CE 0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb
+
+═══════════════════════════════════════════════════════════
+🛸 Deployment Complete. Ready for arbitrage operations.
+═══════════════════════════════════════════════════════════

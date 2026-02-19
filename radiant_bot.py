@@ -254,22 +254,48 @@ class RadiantBot:
         """Initialize all contracts after RPC is connected."""
         self.account = self.w3.eth.account.from_key(PRIVATE_KEY)
         logger.info(f"🔑 Loaded Wallet: {self.account.address}")
-
+        
+        # Initialize contracts blindly (trust addresses)
         self.pool = self.w3.eth.contract(address=POOL_ADDRESS, abi=POOL_ABI)
         self.data_provider = self.w3.eth.contract(address=DATA_PROVIDER_ADDRESS, abi=DATA_PROVIDER_ABI)
         self.addresses_provider = self.w3.eth.contract(address=POOL_ADDRESSES_PROVIDER, abi=ADDRESSES_PROVIDER_ABI)
         self.liquidator_contract = self.w3.eth.contract(address=LIQUIDATOR_ADDRESS, abi=LIQUIDATOR_ABI)
 
-        # Fetch Oracle address dynamically
-        oracle_addr = await self.addresses_provider.functions.getPriceOracle().call()
-        self.oracle_contract = self.w3.eth.contract(address=oracle_addr, abi=ORACLE_ABI)
-
         # Multicall3 — used for batched health-factor checks
         self.multicall = self.w3.eth.contract(address=MULTICALL3_ADDRESS, abi=MULTICALL3_ABI)
 
-        # Cache reserves list
-        self.reserves_list = await self.pool.functions.getReservesList().call()
-        logger.info(f"📚 Loaded {len(self.reserves_list)} market assets.")
+        # Try to fetch Oracle address dynamically, but don't crash if it fails
+        try:
+            oracle_addr = await self.addresses_provider.functions.getPriceOracle().call()
+            self.oracle_contract = self.w3.eth.contract(address=oracle_addr, abi=ORACLE_ABI)
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to fetch Oracle from AddressesProvider: {e}")
+            # Fallback (Radiant PriceOracle on Arbitrum One)
+            # 0xc331D4A790F307D53C9372E9A900eB4E9A4B8b83 (This is a common one, but better to check if it works)
+            # If failed, we just set it to None and hope config is fixed or updated later
+            self.oracle_contract = None
+
+        # Try to cache reserves list, but don't crash
+        try:
+            self.reserves_list = await self.pool.functions.getReservesList().call()
+            logger.info(f"📚 Loaded {len(self.reserves_list)} market assets.")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to fetch Reserves List: {e}")
+            # Fallback list (Common Blue-Chips on Radiant)
+            self.reserves_list = [
+                "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", # USDC
+                "0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8", # USDC.e
+                "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1", # WETH
+                "0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f", # WBTC
+                "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9", # USDT
+                "0x912CE59144191C1204E64559FE8253a0e49E6548", # ARB
+                "0xf97f4df75117a78c1A5a0DBb814Af92455853904", # LINK
+                "0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1", # DAI
+                "0x5979D7b546E38E41137eFe976976aC7739814Df7", # wstETH
+                "0x17FC002b466eEc40DaE837Fc4bE5c67993ddBd6F", # FRAX
+            ]
+            self.reserves_list = [AsyncWeb3.to_checksum_address(addr) for addr in self.reserves_list]
+            logger.info(f"⚠️ Using hardcoded fallback logic for {len(self.reserves_list)} assets.")
 
     async def log_system(self, msg, level="info"):
         if level == "error":
