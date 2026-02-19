@@ -134,6 +134,9 @@ MULTICALL3_ABI = [
 # TOKEN CONFIGURATION — Arbitrum Mainnet (Real Addresses)
 # ═══════════════════════════════════════════════════════════════════════════════
 TOKENS: Dict[str, dict] = {
+    "USDC":   {"address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", "decimals": 6},
+    "USDT":   {"address": "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9", "decimals": 6},
+    "DAI":    {"address": "0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1", "decimals": 18},
     "WETH":   {"address": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1", "decimals": 18},
     "ARB":    {"address": "0x912CE59144191C1204E64559FE8253a0e49E6548", "decimals": 18},
     "MAGIC":  {"address": "0x539bdE0d7Dbd33f84E8aaf9084C942D9800Ef002", "decimals": 18},
@@ -221,6 +224,9 @@ SUSHI_V3_ROUTER  = "0x8A21F6768C1f8075791D08546Dadf6daA0bE820c"  # SushiSwap V3 
 CAMELOT_ROUTER   = "0xc873fEcbd354f5A56E00E710B9048C68fD3EA22B"  # Camelot V2 Router
 CAMELOT_QUOTER   = "0x4a6eDa4451BcF25E07F1f55B77267e5B89975f68"  # Camelot Algebra Quoter
 
+# Curve Finance 3Pool (Arbitrum)
+CURVE_3POOL_ADDRESS = "0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7"
+
 # DEX Registry
 DEXES = {
     "Uniswap_V3": {
@@ -240,6 +246,13 @@ DEXES = {
         "router": CAMELOT_ROUTER,
         "type": "algebra",     # Algebra-style quoter (no fee param, dynamic fees)
         "fee_tiers": [0],      # Camelot uses dynamic fees internally
+    },
+    "Curve_3Pool": {
+        "quoter": CURVE_3POOL_ADDRESS,
+        "router": CURVE_3POOL_ADDRESS,
+        "type": "curve",
+        "fee_tiers": [0],      # No fee tiers for Curve
+        "curve_indices": {"USDC": 1, "USDT": 2, "DAI": 0},
     },
 }
 
@@ -316,6 +329,33 @@ SWAP_ROUTER_ABI = [
         "outputs": [{"name": "amountOut", "type": "uint256"}],
         "stateMutability": "payable",
         "type": "function",
+    }
+]
+
+# Curve 3Pool (Mainnet/Arbitrum)
+CURVE_3POOL_ABI = [
+    {
+        "name": "get_dy",
+        "inputs": [
+            {"name": "i", "type": "int128"},
+            {"name": "j", "type": "int128"},
+            {"name": "dx", "type": "uint256"}
+        ],
+        "outputs": [{"name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "name": "exchange",
+        "inputs": [
+            {"name": "i", "type": "int128"},
+            {"name": "j", "type": "int128"},
+            {"name": "dx", "type": "uint256"},
+            {"name": "min_dy", "type": "uint256"}
+        ],
+        "outputs": [{"name": "", "type": "uint256"}],
+        "stateMutability": "payable",
+        "type": "function"
     }
 ]
 
@@ -446,42 +486,78 @@ async def get_algebra_quote_robust(
 
 def _encode_quoter_call(
     w3: AsyncWeb3,
-    quoter_address: str,
+    quoter_address: str,  # Kept for compatibility, but we prefer dex_config
     token_in: str,
     token_out: str,
     amount_in: int,
     fee: int,
-    dex_type: str,
+    dex_config: Dict,
 ) -> Tuple[str, bytes]:
     """
     Generate (target, calldata) for a quote call.
-    Does NOT make an RPC call.
+    Supports V3, Algebra, and Curve.
     """
+    dex_type = dex_config["type"]
+    
+    # ─── CURVE 3POOL ───
+    if dex_type == "curve":
+        quoter_contract = w3.eth.contract(address=w3.to_checksum_address(quoter_address), abi=CURVE_3POOL_ABI)
+        
+        # Resolve indices
+        # We need to find the index for token_in and token_out
+        # Iterate TOKENS and/or USDC to find symbol matching address?
+        # Better: use the 'curve_indices' map and look up by address-to-symbol.
+        # Since we don't have a reliable address->symbol map passed in, we can try to infer it
+        # or just check against known addresses.
+        
+        indices = dex_config.get("curve_indices", {})
+        
+        # Reverse lookup helper (local to this block)
+        def get_curve_index(addr):
+            # Check against TOKENS
+            for sym, data in TOKENS.items():
+                if data["address"].lower() == addr.lower():
+                    return indices.get(sym)
+            return None
+
+        i = get_curve_index(token_in)
+        j = get_curve_index(token_out)
+
+        if i is None or j is None:
+             # Invalid pair for this pool (e.g. WETH on 3Pool)
+             # Return dummy data that will fail decoding or execution gracefully
+             # Here we return a call to 'get_dy(0,0,0)' which is valid but useless,
+             # OR we raise an error. Raising error is safer but needs handling.
+             # Better: Return a dummy target that is effectively a no-op or revert?
+             # For now, let's assume the caller filters invalid pairs.
+             pass
+
+        # get_dy(int128 i, int128 j, uint256 dx)
+        call_fn = quoter_contract.functions.get_dy(i, j, amount_in)
+        
+        hex_data = call_fn._encode_transaction_data()
+        raw_data = bytes.fromhex(hex_data[2:]) if isinstance(hex_data, str) else bytes(hex_data)
+        return (quoter_contract.address, raw_data)
+
+    # ─── UNISWAP V3 / ALGEBRA ───
     quoter_contract = w3.eth.contract(
         address=w3.to_checksum_address(quoter_address),
         abi=QUOTER_V2_ABI if dex_type == "v3" else ALGEBRA_QUOTER_ABI,
     )
     
     if dex_type == "v3":
-        # Checksum addresses strictly for encoding
         t_in = w3.to_checksum_address(token_in)
         t_out = w3.to_checksum_address(token_out)
-        
-        # quoteExactInputSingle((tokenIn, tokenOut, amountIn, fee, sqrtPriceLimitX96))
         call_fn = quoter_contract.functions.quoteExactInputSingle((
             t_in, t_out, amount_in, fee, 0
         ))
     else:  # algebra
         t_in = w3.to_checksum_address(token_in)
         t_out = w3.to_checksum_address(token_out)
-        
-        # quoteExactInputSingle(tokenIn, tokenOut, amountIn, limitSqrtPrice)
         call_fn = quoter_contract.functions.quoteExactInputSingle(
             t_in, t_out, amount_in, 0
         )
         
-    # Extract raw calldata
-    # We use _encode_transaction_data() which returns a hex string "0x..."
     hex_data = call_fn._encode_transaction_data()
     raw_data = bytes.fromhex(hex_data[2:]) if isinstance(hex_data, str) else bytes(hex_data)
     
@@ -498,12 +574,14 @@ def _decode_quoter_result(raw_bytes: bytes, dex_type: str) -> int:
     try:
         if dex_type == "v3":
             # Returns (amountOut, sqrtPriceX96After, initializedTicksCrossed, gasEstimate)
-            # Tuple types: (uint256, uint160, uint32, uint256)
             decoded = decode(['uint256', 'uint160', 'uint32', 'uint256'], raw_bytes)
+            return decoded[0]
+        elif dex_type == "curve":
+            # Returns (uint256)
+            decoded = decode(['uint256'], raw_bytes)
             return decoded[0]
         else:  # algebra
             # Returns (amountOut, fee)
-            # Tuple types: (uint256, uint16)
             decoded = decode(['uint256', 'uint16'], raw_bytes)
             return decoded[0]
     except Exception:
@@ -562,6 +640,45 @@ def build_v3_swap_calldata(
     return bytes.fromhex(hex_data[2:]) if isinstance(hex_data, str) else bytes(hex_data)
 
 
+def build_curve_swap_calldata(
+    w3: AsyncWeb3,
+    pool_address: str,
+    token_in: str,
+    token_out: str,
+    amount_in: int,
+    amount_out_min: int,
+    dex_config: Dict,
+) -> bytes:
+    """Build calldata for Curve 3Pool exchange."""
+    contract = w3.eth.contract(
+        address=w3.to_checksum_address(pool_address),
+        abi=CURVE_3POOL_ABI,
+    )
+    
+    indices = dex_config.get("curve_indices", {})
+    t_in_lower = token_in.lower()
+    t_out_lower = token_out.lower()
+    
+    i = None
+    j = None
+    
+    # Resolve indices by checking against TOKENS addresses
+    # (Since we don't pass symbols here, avoiding global lookup if possible, but we have TOKENS global)
+    for sym, data in TOKENS.items():
+        addr = data["address"].lower()
+        if addr == t_in_lower:
+            i = indices.get(sym)
+        if addr == t_out_lower:
+            j = indices.get(sym)
+            
+    if i is None or j is None:
+        raise ValueError(f"Invalid tokens for Curve 3Pool: {token_in} -> {token_out}")
+        
+    fn = contract.functions.exchange(i, j, amount_in, amount_out_min)
+    hex_data = fn._encode_transaction_data()
+    return bytes.fromhex(hex_data[2:]) if isinstance(hex_data, str) else bytes(hex_data)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # EXECUTION ENGINE
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -605,15 +722,26 @@ async def execute_arbitrage(
         # amount_out_min = leg_a_token_out minus 0.5% slippage
         leg_a_min_out = leg_a_token_out * (10000 - LEG_A_SLIPPAGE_BPS) // 10000
 
-        data_a = build_v3_swap_calldata(
-            w3,
-            USDC_ADDRESS,
-            token_address,
-            500,  # 0.05% fee tier (most liquid)
-            DEX_ARBITRAGEUR_ADDRESS,
-            flashloan_usdc,     # Exact USDC input
-            leg_a_min_out,      # Minimum tokens expected (with slippage)
-        )
+        if buy_config["type"] == "curve":
+             data_a = build_curve_swap_calldata(
+                w3,
+                buy_config["router"],
+                USDC_ADDRESS,
+                token_address,
+                flashloan_usdc,
+                leg_a_min_out,
+                buy_config
+            )
+        else:
+            data_a = build_v3_swap_calldata(
+                w3,
+                USDC_ADDRESS,
+                token_address,
+                500,  # 0.05% fee tier (most liquid for V3/Camelot usually)
+                DEX_ARBITRAGEUR_ADDRESS,
+                flashloan_usdc,     # Exact USDC input
+                leg_a_min_out,      # Minimum tokens expected
+            )
 
         # ── Leg B calldata: Token → USDC (sell on dex_b) ──
         # amount_in = leg_a_token_out (exact tokens from Leg A quote)
@@ -621,15 +749,26 @@ async def execute_arbitrage(
         flashloan_fee = (flashloan_usdc * AAVE_FLASHLOAN_FEE_BPS) // 10000
         min_usdc_repay = flashloan_usdc + flashloan_fee
 
-        data_b = build_v3_swap_calldata(
-            w3,
-            token_address,
-            USDC_ADDRESS,
-            500,
-            DEX_ARBITRAGEUR_ADDRESS,
-            leg_a_token_out,    # ← EXACT token amount, NEVER zero
-            min_usdc_repay,     # Must repay flashloan + premium
-        )
+        if sell_config["type"] == "curve":
+            data_b = build_curve_swap_calldata(
+                w3,
+                sell_config["router"],
+                token_address,
+                USDC_ADDRESS,
+                leg_a_token_out,
+                min_usdc_repay,
+                sell_config
+            )
+        else:
+            data_b = build_v3_swap_calldata(
+                w3,
+                token_address,
+                USDC_ADDRESS,
+                500,
+                DEX_ARBITRAGEUR_ADDRESS,
+                leg_a_token_out,    # ← EXACT token amount
+                min_usdc_repay,     # Must repay flashloan + premium
+            )
 
         # ── Encode ArbParams struct ──
         arb_params = HexBytes(encode(
@@ -760,6 +899,11 @@ async def scan_and_execute(rpc_manager: AsyncRPCManager, block_number: int, eth_
         token_addr = token_info["address"]
         
         for dex_name, dex_config in DEXES.items():
+            # Skip Curve if token not in 3Pool (USDC, USDT, DAI)
+            if dex_config["type"] == "curve":
+                if symbol not in ["USDC", "USDT", "DAI"]:
+                    continue
+            
             fees = dex_config["fee_tiers"]
             for fee in fees:
                 target, calldata = _encode_quoter_call(
@@ -769,7 +913,7 @@ async def scan_and_execute(rpc_manager: AsyncRPCManager, block_number: int, eth_
                     token_addr, 
                     FLASHLOAN_USDC_AMOUNT, 
                     fee, 
-                    dex_config["type"]
+                    dex_config
                 )
                 leg_a_calls.append((target, calldata))
                 leg_a_map.append((symbol, dex_name, fee, dex_config["type"]))
@@ -846,6 +990,12 @@ async def scan_and_execute(rpc_manager: AsyncRPCManager, block_number: int, eth_
 
             # Build Leg B calls for all fee tiers of sell_dex
             sell_config = DEXES[sell_dex]
+
+            # Skip Curve if token not in 3Pool (USDC, USDT, DAI)
+            if sell_config["type"] == "curve":
+                 if symbol not in ["USDC", "USDT", "DAI"]:
+                     continue
+
             fees = sell_config["fee_tiers"]
             
             for fee in fees:
@@ -856,7 +1006,7 @@ async def scan_and_execute(rpc_manager: AsyncRPCManager, block_number: int, eth_
                     USDC_ADDRESS, 
                     amount_in_token, # Exact output from Leg A
                     fee, 
-                    sell_config["type"]
+                    sell_config
                 )
                 leg_b_calls.append((target, calldata))
                 leg_b_map.append((symbol, buy_dex, sell_dex, fee, sell_config["type"], amount_in_token))
