@@ -193,7 +193,7 @@ class AsyncRPCManager:
         logger.info(f"🔌 Connecting to RPC: {url[:40]}...")
         
         if url.startswith("wss://"):
-            self.w3 = AsyncWeb3(AsyncWeb3.AsyncWebsocketProvider(url))
+            self.w3 = AsyncWeb3(AsyncWeb3.WebSocketProvider(url))
         else:
             self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(url))
             
