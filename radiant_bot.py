@@ -173,12 +173,7 @@ ERC20_ABI = [{
 class AsyncRPCManager:
     """Manages RPC endpoints with automatic failover for 429 AND 403 errors."""
     def __init__(self):
-        self.endpoints = []
-        if PRIMARY_WSS:
-            self.endpoints.append(PRIMARY_WSS)
-        if PRIMARY_RPC:
-            self.endpoints.append(PRIMARY_RPC)
-        self.endpoints.extend(FALLBACK_RPCS)
+        self.endpoints = [PRIMARY_RPC] + FALLBACK_RPCS
         self.current_index = 0
         self.strike_count = 0
         self.last_rate_limit = 0
