@@ -5,6 +5,7 @@ import logging
 import time
 import warnings
 import aiohttp
+import websockets
 
 warnings.filterwarnings("ignore", category=ResourceWarning, module="aiohttp")
 from decimal import Decimal
@@ -38,6 +39,7 @@ except ImportError:
     logger.warning("⚠️ db_manager.py not found. Dashboard logging disabled.")
 
 # Configuration Constants
+PRIMARY_WSS = os.getenv("PRIMARY_WSS")
 PRIMARY_RPC = os.getenv("PRIMARY_RPC")
 FALLBACK_RPCS = [r.strip() for r in os.getenv("FALLBACK_RPCS", "").split(",") if r.strip()]
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
@@ -171,7 +173,12 @@ ERC20_ABI = [{
 class AsyncRPCManager:
     """Manages RPC endpoints with automatic failover for 429 AND 403 errors."""
     def __init__(self):
-        self.endpoints = [PRIMARY_RPC] + FALLBACK_RPCS
+        self.endpoints = []
+        if PRIMARY_WSS:
+            self.endpoints.append(PRIMARY_WSS)
+        if PRIMARY_RPC:
+            self.endpoints.append(PRIMARY_RPC)
+        self.endpoints.extend(FALLBACK_RPCS)
         self.current_index = 0
         self.strike_count = 0
         self.last_rate_limit = 0
@@ -192,8 +199,12 @@ class AsyncRPCManager:
 
         url = self.endpoints[self.current_index]
         logger.info(f"🔌 Connecting to RPC: {url[:40]}...")
-        self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(url))
         
+        if url.startswith("wss://"):
+            self.w3 = AsyncWeb3(AsyncWeb3.AsyncWebsocketProvider(url))
+        else:
+            self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(url))
+            
         try:
             connected = await self.w3.is_connected()
             if not connected:
@@ -222,6 +233,41 @@ class AsyncRPCManager:
         """Check if an error is a rate limit / forbidden error."""
         err_str = str(error).lower()
         return any(k in err_str for k in ["429", "403", "rate", "forbidden", "quota", "too many requests", "-32001"])
+
+    async def block_stream(self):
+        """Yields new block numbers using WSS subscriptions or HTTP polling fallback."""
+        url = self.endpoints[self.current_index]
+        
+        if url.startswith("wss://"):
+            logger.info(f"🎧 Starting WSS Block Stream on {url[:40]}...")
+            async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
+                sub_msg = {"jsonrpc": "2.0", "id": 1, "method": "eth_subscribe", "params": ["newHeads"]}
+                await ws.send(json.dumps(sub_msg))
+                response = await ws.recv()
+                logger.info(f"✅ WSS Subscribed: {response}")
+                
+                while True:
+                    msg = await ws.recv()
+                    data = json.loads(msg)
+                    if "method" in data and data["method"] == "eth_subscription":
+                        block_hex = data["params"]["result"]["number"]
+                        block_number = int(block_hex, 16)
+                        yield block_number
+        else:
+            logger.info(f"📡 Starting HTTP Block Polling on {url[:40]}...")
+            last_block = 0
+            if self.w3:
+                last_block = await self.w3.eth.block_number
+                yield last_block
+
+            while True:
+                current_block = await self.w3.eth.block_number
+                if current_block > last_block:
+                    last_block = current_block
+                    yield current_block
+                else:
+                    await asyncio.sleep(POLL_INTERVAL)
+
 
 
 # --- 3. RADIANT BOT CLASS ---
@@ -795,13 +841,10 @@ class RadiantBot:
 
         while True:
             try:
-                current_block = await self.w3.eth.block_number
-
-                if current_block > self.last_processed_block:
-                    self.last_processed_block = current_block
-                    await self.process_block(current_block)
-                else:
-                    await asyncio.sleep(POLL_INTERVAL)
+                async for current_block in self.rpc.block_stream():
+                    if current_block > self.last_processed_block:
+                        self.last_processed_block = current_block
+                        await self.process_block(current_block)
 
             except Exception as e:
                 if self.rpc.is_rate_limit_error(e):

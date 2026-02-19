@@ -22,6 +22,7 @@ import json
 import logging
 import time
 import traceback
+import websockets
 from decimal import Decimal
 from itertools import permutations
 from typing import Dict, List, Optional, Tuple
@@ -54,7 +55,8 @@ logger = logging.getLogger("ArbEngine")
 # ═══════════════════════════════════════════════════════════════════════════════
 load_dotenv()
 
-# RPC — unified convention: PRIMARY_RPC is the main HTTP endpoint (matches gravity_bot.py)
+# RPC — unified convention: PRIMARY_WSS and PRIMARY_RPC
+PRIMARY_WSS = os.getenv("PRIMARY_WSS")
 PRIMARY_RPC = os.getenv("PRIMARY_RPC")
 if not PRIMARY_RPC:
     PRIMARY_RPC = os.getenv("RPC_URL", "")
@@ -165,7 +167,12 @@ FLASHLOAN_USDC_AMOUNT = 1000 * 10**USDC_DECIMALS  # $1,000
 class AsyncRPCManager:
     """Manages RPC endpoints with automatic failover for 429 AND 403 errors."""
     def __init__(self):
-        self.endpoints = [PRIMARY_RPC] + FALLBACK_RPCS
+        self.endpoints = []
+        if PRIMARY_WSS:
+            self.endpoints.append(PRIMARY_WSS)
+        if PRIMARY_RPC:
+            self.endpoints.append(PRIMARY_RPC)
+        self.endpoints.extend(FALLBACK_RPCS)
         self.current_index = 0
         self.strike_count = 0
         self.w3 = None
@@ -184,8 +191,12 @@ class AsyncRPCManager:
 
         url = self.endpoints[self.current_index]
         logger.info(f"🔌 Connecting to RPC: {url[:40]}...")
-        self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(url))
         
+        if url.startswith("wss://"):
+            self.w3 = AsyncWeb3(AsyncWeb3.AsyncWebsocketProvider(url))
+        else:
+            self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(url))
+            
         try:
             connected = await self.w3.is_connected()
             if not connected:
@@ -208,6 +219,45 @@ class AsyncRPCManager:
             cooldown = 2
             logger.warning(f"⏳ Rate limited (Strike {self.strike_count}/3). Cooling down {cooldown}s...")
             await asyncio.sleep(cooldown)
+
+    def is_rate_limit_error(self, error):
+        """Check if an error is a rate limit / forbidden error."""
+        err_str = str(error).lower()
+        return any(k in err_str for k in ["429", "403", "rate", "forbidden", "quota", "too many requests", "-32001"])
+
+    async def block_stream(self):
+        """Yields new block numbers using WSS subscriptions or HTTP polling fallback."""
+        url = self.endpoints[self.current_index]
+        
+        if url.startswith("wss://"):
+            logger.info(f"🎧 Starting WSS Block Stream on {url[:40]}...")
+            async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
+                sub_msg = {"jsonrpc": "2.0", "id": 1, "method": "eth_subscribe", "params": ["newHeads"]}
+                await ws.send(json.dumps(sub_msg))
+                response = await ws.recv()
+                logger.info(f"✅ WSS Subscribed: {response}")
+                
+                while True:
+                    msg = await ws.recv()
+                    data = json.loads(msg)
+                    if "method" in data and data["method"] == "eth_subscription":
+                        block_hex = data["params"]["result"]["number"]
+                        block_number = int(block_hex, 16)
+                        yield block_number
+        else:
+            logger.info(f"📡 Starting HTTP Block Polling on {url[:40]}...")
+            last_block = 0
+            if self.w3:
+                last_block = await self.w3.eth.block_number
+                yield last_block
+
+            while True:
+                current_block = await self.w3.eth.block_number
+                if current_block > last_block:
+                    last_block = current_block
+                    yield current_block
+                else:
+                    await asyncio.sleep(SCAN_COOLDOWN_SECONDS)
 
     async def get_w3(self) -> AsyncWeb3:
         if self.w3 is None:
@@ -1167,53 +1217,41 @@ async def main():
     
     logger.info(f"📈 ETH Price: ${eth_price_usd:,.0f}")
 
-    # ── Infinite Scan Loop ──
+    # ── Streaming Scan Loop ──
     while True:
         try:
-            scan_start = time.time()
-            w3 = await rpc_manager.get_w3()
-            
-            try:
-                current_block = await w3.eth.block_number
-            except Exception:
-                await rpc_manager.handle_rate_limit()
-                continue
+            async for current_block in rpc_manager.block_stream():
+                scan_start = time.time()
+                
+                # Refresh ETH price every 5 minutes
+                if time.time() - eth_price_refresh > 300:
+                    eth_price_usd = await get_eth_price(rpc_manager)
+                    eth_price_refresh = time.time()
+                    logger.info(f"📈 ETH Price refreshed: ${eth_price_usd:,.0f}")
 
-            # Skip if same block
-            if current_block <= last_block:
-                await asyncio.sleep(SCAN_COOLDOWN_SECONDS)
-                continue
+                # ── Run scan ──
+                spreads = await scan_and_execute(rpc_manager, current_block, eth_price_usd)
 
-            # Refresh ETH price every 5 minutes
-            if time.time() - eth_price_refresh > 300:
-                eth_price_usd = await get_eth_price(rpc_manager)
-                eth_price_refresh = time.time()
-                logger.info(f"📈 ETH Price refreshed: ${eth_price_usd:,.0f}")
+                scan_duration = time.time() - scan_start
+                blocks_jumped = current_block - last_block if last_block > 0 else 1
+                last_block = current_block
 
-            # ── Run scan ──
-            spreads = await scan_and_execute(rpc_manager, current_block, eth_price_usd)
-
-            scan_duration = time.time() - scan_start
-            blocks_jumped = current_block - last_block if last_block > 0 else 1
-            last_block = current_block
-
-            logger.info(
-                f"🧱 Block {current_block} | "
-                f"Spreads: {spreads} | "
-                f"{scan_duration*1000:.0f}ms | "
-                f"Δ{blocks_jumped} blocks"
-            )
-
-            # Dynamic sleep — Arbitrum has ~250ms blocks
-            sleep_time = max(SCAN_COOLDOWN_SECONDS, 1.0 - scan_duration)
-            await asyncio.sleep(sleep_time)
+                logger.info(
+                    f"🧱 Block {current_block} | "
+                    f"Spreads: {spreads} | "
+                    f"{scan_duration*1000:.0f}ms | "
+                    f"Δ{blocks_jumped} blocks"
+                )
 
         except KeyboardInterrupt:
             logger.info("⏹️  Shutting down gracefully...")
             break
         except Exception as e:
-            logger.error(f"❌ Loop error: {e}")
-            logger.debug(traceback.format_exc())
+            if rpc_manager.is_rate_limit_error(e):
+                await rpc_manager.handle_rate_limit()
+            else:
+                logger.error(f"❌ Loop error: {e}")
+                logger.debug(traceback.format_exc())
             await asyncio.sleep(1)
 
 

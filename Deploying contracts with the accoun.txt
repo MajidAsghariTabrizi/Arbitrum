@@ -11,11 +11,12 @@ git reset --hard origin/main
 
 git add .
 
-git commit -m "radiant"
+git commit -m "Upgrading Dashboard and DB Manager"
 
 git push
 
 scp .env root@185.215.244.70:/root/Arbitrum/
+ssh root@185.215.244.70
 
 
 
