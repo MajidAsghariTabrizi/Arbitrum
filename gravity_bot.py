@@ -4,6 +4,9 @@ import asyncio
 import logging
 import time
 import warnings
+import aiohttp
+warnings.filterwarnings("ignore", category=aiohttp.ClientConnectorError)
+warnings.filterwarnings("ignore", category=ResourceWarning, module="aiohttp")
 from decimal import Decimal
 import aiofiles
 import requests
@@ -201,7 +204,7 @@ class AsyncRPCManager:
     def is_rate_limit_error(self, error):
         """Check if an error is a rate limit / forbidden error."""
         err_str = str(error).lower()
-        return "429" in err_str or "403" in err_str or "rate" in err_str or "forbidden" in err_str
+        return any(k in err_str for k in ["429", "403", "rate", "forbidden", "quota", "too many requests", "-32001"])
 
 
 # --- 3. ANTI-GRAVITY BOT CLASS ---
