@@ -168,12 +168,7 @@ FLASHLOAN_USDC_AMOUNT = 1000 * 10**USDC_DECIMALS  # $1,000
 class AsyncRPCManager:
     """Manages RPC endpoints with automatic failover for 429 AND 403 errors."""
     def __init__(self):
-        self.endpoints = []
-        if PRIMARY_WSS:
-            self.endpoints.append(PRIMARY_WSS)
-        if PRIMARY_RPC:
-            self.endpoints.append(PRIMARY_RPC)
-        self.endpoints.extend(FALLBACK_RPCS)
+        self.endpoints = [PRIMARY_RPC] + FALLBACK_RPCS
         self.current_index = 0
         self.strike_count = 0
         self.w3 = None
