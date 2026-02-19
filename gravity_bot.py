@@ -5,7 +5,7 @@ import logging
 import time
 import warnings
 import aiohttp
-warnings.filterwarnings("ignore", category=aiohttp.ClientConnectorError)
+
 warnings.filterwarnings("ignore", category=ResourceWarning, module="aiohttp")
 from decimal import Decimal
 import aiofiles
