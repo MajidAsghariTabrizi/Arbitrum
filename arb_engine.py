@@ -194,6 +194,7 @@ class AsyncRPCManager:
         
         if url.startswith("wss://"):
             self.w3 = AsyncWeb3(AsyncWeb3.WebSocketProvider(url))
+            await self.w3.provider.connect()
         else:
             self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(url))
             
