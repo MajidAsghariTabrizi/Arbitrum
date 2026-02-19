@@ -343,6 +343,9 @@ class RadiantBot:
 
     async def update_prices(self):
         """Updates asset prices in bulk from Radiant Oracle."""
+        if not self.oracle_contract:
+            return
+
         try:
             prices = await self.oracle_contract.functions.getAssetsPrices(self.reserves_list).call()
             for i, asset in enumerate(self.reserves_list):
@@ -370,6 +373,10 @@ class RadiantBot:
         """Reloads radiant_targets.json asynchronously into tiered RAM queues."""
         try:
             path = "/root/Arbitrum/radiant_targets.json" if os.path.exists("/root/Arbitrum") else "radiant_targets.json"
+            
+            if not os.path.exists(path):
+                return
+
             async with aiofiles.open(path, mode='r') as f:
                 content = await f.read()
                 if not content:
@@ -412,9 +419,9 @@ class RadiantBot:
                 continue
 
             asset = self.reserves_list[i]
-            price = self.prices.get(asset, 0)
-            if price == 0:
-                continue
+            # Fallback to 1 base unit if oracle fails (assume parity if price unknown)
+            # This allows liquidation attempt even if price feed is down
+            price = self.prices.get(asset, 10**18)
 
             # Collateral (Index 0)
             collateral_bal = res[0]
