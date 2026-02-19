@@ -345,7 +345,7 @@ MIN_PROFIT_USD = 1.00
 SCAN_COOLDOWN_SECONDS = 0.5
 LEG_A_SLIPPAGE_BPS = 50           # 0.5% max slippage allowed for tri-arb routes
 SAFETY_MARGIN_MULTIPLIER = 1.5
-MULTICALL_CHUNK_SIZE = 15
+MULTICALL_CHUNK_SIZE = 5
 
 # Route Failure Handling
 MAX_ROUTE_FAILURES = 3
@@ -636,7 +636,7 @@ async def get_eth_price(rpc_manager: AsyncRPCManager) -> float:
         w3 = await rpc_manager.get_w3()
         multicall = w3.eth.contract(address=w3.to_checksum_address(MULTICALL3_ADDRESS), abi=MULTICALL3_ABI)
         target, data = _encode_quoter_call(w3, UNI_V3_QUOTER, TOKENS["WETH"]["address"], USDC_ADDRESS, 10**18, 500, DEXES["Uniswap_V3"])
-        result = await multicall.functions.tryAggregate(False, [(target, data)]).call()
+        result = await multicall.functions.tryAggregate(False, [(target, data)]).call({'gas': 300_000_000})
         success, ret_bytes = result[0]
         if success:
             return _decode_quoter_result(ret_bytes, "v3") / (10 ** USDC_DECIMALS)
@@ -650,7 +650,7 @@ async def perform_multicall(multicall_contract, calls_list: List[Tuple[str, byte
         return []
         
     chunks = [calls_list[i : i + MULTICALL_CHUNK_SIZE] for i in range(0, len(calls_list), MULTICALL_CHUNK_SIZE)]
-    tasks = [multicall_contract.functions.tryAggregate(False, chunk).call({'gas': 50_000_000}) for chunk in chunks]
+    tasks = [multicall_contract.functions.tryAggregate(False, chunk).call({'gas': 300_000_000}) for chunk in chunks]
     chunk_results = await asyncio.gather(*tasks)
     return [item for sublist in chunk_results for item in sublist]
 
@@ -701,6 +701,7 @@ async def scan_triangular_spreads(rpc_manager: AsyncRPCManager, block_number: in
     for hub in HUBS:
         for dex1, data1 in best_leg1[hub].items():
             in_amt = data1["amount_out"]
+            if in_amt <= 0: continue
             fee1 = data1["fee"]
             for tgt in TARGETS:
                 for dex2, config in DEXES.items():
@@ -714,6 +715,7 @@ async def scan_triangular_spreads(rpc_manager: AsyncRPCManager, block_number: in
     for tgt in TARGETS:
         for dex1, data1 in best_leg1[tgt].items():
             in_amt = data1["amount_out"]
+            if in_amt <= 0: continue
             fee1 = data1["fee"]
             for hub in HUBS:
                 for dex2, config in DEXES.items():
@@ -752,6 +754,7 @@ async def scan_triangular_spreads(rpc_manager: AsyncRPCManager, block_number: in
     # Route 1: Target -> USDC
     for (hub, tgt, dex1, dex2), data in best_leg2_r1.items():
         in_amt = data["amount_out"]
+        if in_amt <= 0: continue
         fee1, fee2, leg2_in = data["fee1"], data["fee2"], data["in_amount"]
         
         # Route logic check
@@ -772,6 +775,7 @@ async def scan_triangular_spreads(rpc_manager: AsyncRPCManager, block_number: in
     # Route 2: Hub -> USDC
     for (tgt, hub, dex1, dex2), data in best_leg2_r2.items():
         in_amt = data["amount_out"]
+        if in_amt <= 0: continue
         fee1, fee2, leg2_in = data["fee1"], data["fee2"], data["in_amount"]
         
         route_key = f"{tgt}-{hub}/{dex1}-{dex2}"
