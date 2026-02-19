@@ -237,7 +237,7 @@ def classify_targets_multicall(all_users_list):
         for user in batch:
             try:
                 call_data = pool.functions.getUserAccountData(Web3.to_checksum_address(user))._encode_transaction_data()
-                calls.append((dynamic_pool_address, call_data)) # <--- FIXED HERE
+                calls.append((dynamic_pool_address, call_data))
             except Exception:
                 continue
             
