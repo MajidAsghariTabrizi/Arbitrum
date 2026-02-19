@@ -62,9 +62,9 @@ TIER_1_MAX_HF = Decimal('1.050')
 TIER_2_MAX_HF = Decimal('1.200')
 
 # Radiant (Aave V2) Addresses
-POOL_ADDRESSES_PROVIDER = AsyncWeb3.to_checksum_address("0x091d52Cce1d49c8CE620B250284d126422CE04f0")
-POOL_ADDRESS = AsyncWeb3.to_checksum_address("0xF4B1486DD74D07706052A33d31d7c0AAFD0659E1")
-DATA_PROVIDER_ADDRESS = AsyncWeb3.to_checksum_address("0x596BBA96C892246dC955aAd9fA36B6900f684307")
+POOL_ADDRESSES_PROVIDER = AsyncWeb3.to_checksum_address("0x454a8daf74b24037ee2fa073ce1be9277ed6160a")
+# POOL_ADDRESS removed (fetched dynamically)
+DATA_PROVIDER_ADDRESS = AsyncWeb3.to_checksum_address("0xa3e42d11d8CC148160CC3ACED757FB44696a9CcA")
 # Note: QUOTER is not used directly here, but available if needed.
 QUOTER_V2_ADDRESS = AsyncWeb3.to_checksum_address("0x61fFE014bA17989E743c5F6cB21bF9697530B21e")
 
@@ -126,6 +126,12 @@ ORACLE_ABI = [{
 ADDRESSES_PROVIDER_ABI = [{
     "inputs": [],
     "name": "getPriceOracle",
+    "outputs": [{"internalType": "address", "name": "", "type": "address"}],
+    "stateMutability": "view",
+    "type": "function"
+}, {
+    "inputs": [],
+    "name": "getLendingPool",
     "outputs": [{"internalType": "address", "name": "", "type": "address"}],
     "stateMutability": "view",
     "type": "function"
@@ -256,10 +262,19 @@ class RadiantBot:
         logger.info(f"🔑 Loaded Wallet: {self.account.address}")
         
         # Initialize contracts blindly (trust addresses)
-        self.pool = self.w3.eth.contract(address=POOL_ADDRESS, abi=POOL_ABI)
         self.data_provider = self.w3.eth.contract(address=DATA_PROVIDER_ADDRESS, abi=DATA_PROVIDER_ABI)
         self.addresses_provider = self.w3.eth.contract(address=POOL_ADDRESSES_PROVIDER, abi=ADDRESSES_PROVIDER_ABI)
         self.liquidator_contract = self.w3.eth.contract(address=LIQUIDATOR_ADDRESS, abi=LIQUIDATOR_ABI)
+
+        # Dynamic Pool Fetch
+        try:
+             pool_addr = await self.addresses_provider.functions.getLendingPool().call()
+             logger.info(f"🏊 Radiant Lending Pool found at: {pool_addr}")
+             self.pool = self.w3.eth.contract(address=pool_addr, abi=POOL_ABI)
+        except Exception as e:
+             logger.error(f"❌ Failed to fetch Lending Pool address: {e}")
+             # Better to raise error here as bot cannot function without pool
+             raise e
 
         # Multicall3 — used for batched health-factor checks
         self.multicall = self.w3.eth.contract(address=MULTICALL3_ADDRESS, abi=MULTICALL3_ABI)

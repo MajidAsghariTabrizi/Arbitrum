@@ -5,7 +5,7 @@ async function main() {
     console.log("Deploying RadiantLiquidator with account:", deployer.address);
 
     // Radiant Provider on Arbitrum (from user request)
-    const RADIANT_PROVIDER = "0x091d52cce1d49c8ce620b250284d126422ce04f0";
+    const RADIANT_PROVIDER = "0x454a8daf74b24037ee2fa073ce1be9277ed6160a";
 
     // Uniswap V3 SwapRouter (from user request)
     const SWAP_ROUTER = "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45";

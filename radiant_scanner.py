@@ -99,12 +99,24 @@ class SyncRPCManager:
 rpc_manager = SyncRPCManager()
 
 # --- CONFIGURATION (RADIANT SPECIFIC) ---
-POOL_ADDRESSES_PROVIDER = Web3.to_checksum_address("0x091d52Cce1d49c8CE620B250284d126422CE04f0")
-POOL_ADDRESS = Web3.to_checksum_address("0xF4B1486DD74D07706052A33d31d7c0AAFD0659E1")
-DATA_PROVIDER_ADDRESS = Web3.to_checksum_address("0x596BBA96C892246dC955aAd9fA36B6900f684307") # Radiant Protocol Data Provider
-MULTICALL3_ADDRESS = Web3.to_checksum_address("0xcA11bde05977b3631167028862bE2a173976CA11")
+POOL_ADDRESSES_PROVIDER = Web3.to_checksum_address("0x2032b9A8e9F7e76768CA9271003d3e43E1616B1F") # Updated Provider
+DATA_PROVIDER_ADDRESS = Web3.to_checksum_address("0x596BBA96C892246dC955aAd9fA36B6900f684307") # Keep existing Data Provider? NO, User said update.
+# User said: Update Provider: 0x454a8daf74b24037ee2fa073ce1be9277ed6160a
+# Update Data Provider: 0xa3e42d11d8CC148160CC3ACED757FB44696a9CcA
 
+POOL_ADDRESSES_PROVIDER = Web3.to_checksum_address("0x454a8daf74b24037ee2fa073ce1be9277ed6160a")
+DATA_PROVIDER_ADDRESS = Web3.to_checksum_address("0xa3e42d11d8CC148160CC3ACED757FB44696a9CcA")
+
+MULTICALL3_ADDRESS = Web3.to_checksum_address("0xcA11bde05977b3631167028862bE2a173976CA11")
 MULTICALL3_ABI = [{"inputs":[{"components":[{"internalType":"address","name":"target","type":"address"},{"internalType":"bytes","name":"callData","type":"bytes"}],"internalType":"struct Multicall3.Call[]","name":"calls","type":"tuple[]"}],"name":"aggregate","outputs":[{"internalType":"uint256","name":"blockNumber","type":"uint256"},{"internalType":"bytes[]","name":"returnData","type":"bytes[]"}],"stateMutability":"view","type":"function"}]
+
+ADDRESSES_PROVIDER_ABI = [{
+    "inputs": [],
+    "name": "getLendingPool",
+    "outputs": [{"internalType": "address", "name": "", "type": "address"}],
+    "stateMutability": "view",
+    "type": "function"
+}]
 
 POOL_ABI = [{
     "inputs": [{"internalType": "address", "name": "user", "type": "address"}],
@@ -203,7 +215,19 @@ def save_targets_atomic(targets_data):
 
 def classify_targets_multicall(all_users_list):
     w3 = rpc_manager.w3
-    pool = w3.eth.contract(address=POOL_ADDRESS, abi=POOL_ABI)
+    
+    # Dynamic Pool Fetch
+    pool_address = POOL_ADDRESS # Wait, user said remove hardcoded POOL_ADDRESS.
+    # User said: In classify_targets_multicall, instantiate the addresses_provider and dynamically fetch POOL_ADDRESS
+    
+    addresses_provider = w3.eth.contract(address=POOL_ADDRESSES_PROVIDER, abi=ADDRESSES_PROVIDER_ABI)
+    try:
+         pool_address = rpc_manager.call(addresses_provider.functions.getLendingPool().call)
+    except Exception as e:
+         print(f"❌ Failed to fetch POOL address: {e}")
+         return {"tier_1_danger": [], "tier_2_watchlist": []}
+
+    pool = w3.eth.contract(address=pool_address, abi=POOL_ABI)
     multicall = w3.eth.contract(address=MULTICALL3_ADDRESS, abi=MULTICALL3_ABI)
     tier_1 = []
     tier_2 = []
@@ -215,7 +239,7 @@ def classify_targets_multicall(all_users_list):
         for user in batch:
             try:
                 call_data = pool.functions.getUserAccountData(Web3.to_checksum_address(user))._encode_transaction_data()
-                calls.append((POOL_ADDRESS, call_data))
+                calls.append((pool_address, call_data))
             except Exception:
                 continue
         if not calls:
