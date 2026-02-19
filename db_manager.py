@@ -183,6 +183,23 @@ def get_recent_logs(limit=50):
         return []
 
 
+def get_critical_logs(limit=10):
+    """Fetches recent ERROR and WARNING logs for the Error Board."""
+    try:
+        with db_lock:
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM logs WHERE level IN ('error', 'warning', 'ERROR', 'WARNING') ORDER BY id DESC LIMIT ?", 
+                (limit,)
+            )
+            rows = cursor.fetchall()
+            conn.close()
+            return rows
+    except Exception:
+        return []
+
+
 def get_executions(limit=50):
     try:
         with db_lock:

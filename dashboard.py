@@ -1,16 +1,16 @@
 """
 ═══════════════════════════════════════════════════════════════════════════════
-🛸 ANTI-GRAVITY — Mission Control Dashboard (Streamlit)
+🛸 ANTI-GRAVITY — Executive Command Center (Streamlit)
 ═══════════════════════════════════════════════════════════════════════════════
-Unified dashboard for all Anti-Gravity business lines:
-  Tab 1: 📡 Radar          — Health Factor vs Debt scatter plot
-  Tab 2: 🔴 Danger Zone    — Tier 1 targets (HF < 1.05)
-  Tab 3: 🟠 Watchlist      — Tier 2 targets (1.05 ≤ HF < 1.20)
-  Tab 4: ⚔️ Executions     — Liquidation history
-  Tab 5: 🔄 DEX Arbitrage  — Spread monitoring, live charts, arb executions
-  Tab 6: 📜 Live Terminal  — System log viewer
+Ultimate unified dashboard for all MEV operations.
 
-Uses width="stretch" for Streamlit dataframes (deprecation-safe).
+Features:
+  Tab 1: 🌍 Main Command  — PM2 Fleet Health, Error Board, Global KPIs
+  Tab 2: ⚔️ Liquidations — Radar, Danger Zone, Watchlist, Executions
+  Tab 3: 🔄 Arbitrage    — Spread monitoring, Live charts, Arb history
+  Tab 4: 📜 Full Terminal — Complete system log viewer
+
+Uses subprocess.check_output to ping PM2 for live backend health.
 ═══════════════════════════════════════════════════════════════════════════════
 """
 
@@ -23,6 +23,7 @@ import json
 import time
 import os
 import re
+import subprocess
 from datetime import datetime
 
 # Try to import st_autorefresh for clean auto-refresh
@@ -34,10 +35,10 @@ except ImportError:
 
 # --- Configuration ---
 st.set_page_config(
-    page_title="⚡ Anti-Gravity — Mission Control",
+    page_title="⚡ Anti-Gravity — Command Center",
     page_icon="🛸",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed"
 )
 
 # DB Path
@@ -48,101 +49,168 @@ DB_FILE = "mission_control.db"
 # =====================================================================
 st.markdown("""
     <style>
-        /* Global spacing */
-        .block-container { padding-top: 0.8rem; padding-bottom: 1rem; }
+        /* Global spacing & Theme */
+        .block-container { padding-top: 2rem; padding-bottom: 2rem; max-width: 95%; }
+        body { background-color: #050508; color: #f1f2f6; }
 
         /* Metric Cards */
         div[data-testid="stMetricValue"] {
             font-family: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
-            font-size: 1.5rem;
-            font-weight: 700;
+            font-size: 2rem;
+            font-weight: 800;
+            text-shadow: 0 0 10px rgba(255,255,255,0.1);
         }
         div[data-testid="stMetricLabel"] {
-            font-size: 0.8rem;
+            font-size: 0.9rem;
             text-transform: uppercase;
-            letter-spacing: 0.06em;
-            opacity: 0.75;
+            letter-spacing: 0.1em;
+            font-weight: 600;
+            opacity: 0.8;
         }
 
         /* KPI Card Highlights */
-        .kpi-danger div[data-testid="stMetricValue"] { color: #ff4757 !important; }
-        .kpi-warning div[data-testid="stMetricValue"] { color: #ffa502 !important; }
-        .kpi-safe div[data-testid="stMetricValue"] { color: #2ed573 !important; }
-        .kpi-info div[data-testid="stMetricValue"] { color: #70a1ff !important; }
-        .kpi-profit div[data-testid="stMetricValue"] { color: #7bed9f !important; }
-        .kpi-arb div[data-testid="stMetricValue"] { color: #1e90ff !important; }
+        .kpi-profit div[data-testid="stMetricValue"] { color: #00e676 !important; text-shadow: 0 0 15px rgba(0,230,118,0.3); }
+        .kpi-hunts div[data-testid="stMetricValue"]  { color: #00b0ff !important; text-shadow: 0 0 15px rgba(0,176,255,0.3); }
+        .kpi-danger div[data-testid="stMetricValue"] { color: #ff1744 !important; text-shadow: 0 0 15px rgba(255,23,68,0.3); }
+        .kpi-arb div[data-testid="stMetricValue"]    { color: #d500f9 !important; text-shadow: 0 0 15px rgba(213,0,249,0.3); }
 
         /* Header Bar */
         .header-bar {
-            background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
-            padding: 14px 24px;
-            border-radius: 10px;
-            margin-bottom: 1rem;
-            color: #f1f2f6;
-            font-size: 1.15rem;
-            font-weight: 700;
-            letter-spacing: 0.03em;
-            border: 1px solid rgba(102, 126, 234, 0.25);
-            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+            background: linear-gradient(90deg, #11111a 0%, #1a1a2e 50%, #11111a 100%);
+            padding: 20px 30px;
+            border-radius: 12px;
+            margin-bottom: 2rem;
+            color: #ffffff;
+            font-size: 1.5rem;
+            font-weight: 800;
+            letter-spacing: 0.05em;
+            border-left: 4px solid #00b0ff;
+            border-right: 4px solid #00b0ff;
+            box-shadow: 0 8px 32px 0 rgba(0,0,0,0.5);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
         }
 
-        /* Terminal Log Container */
+        /* PM2 Fleet Status Table */
+        .fleet-table {
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 0 8px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 1.1rem;
+        }
+        .fleet-table th {
+            text-align: left;
+            padding: 12px 20px;
+            color: #8c9eff;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            font-weight: 700;
+            font-size: 0.85rem;
+            border-bottom: 1px solid rgba(140, 158, 255, 0.2);
+        }
+        .fleet-table td {
+            background-color: #0c0c14;
+            padding: 16px 20px;
+            border-top: 1px solid rgba(255,255,255,0.05);
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+        }
+        .fleet-table tr td:first-child { border-left: 1px solid rgba(255,255,255,0.05); border-top-left-radius: 8px; border-bottom-left-radius: 8px; font-weight: bold;}
+        .fleet-table tr td:last-child { border-right: 1px solid rgba(255,255,255,0.05); border-top-right-radius: 8px; border-bottom-right-radius: 8px; }
+        
+        .status-online { color: #00e676; font-weight: bold; text-shadow: 0 0 8px rgba(0,230,118,0.5); }
+        .status-offline { color: #ff1744; font-weight: bold; padding: 4px 8px; background: rgba(255,23,68,0.1); border-radius: 4px; border: 1px solid rgba(255,23,68,0.3); animation: pulse 2s infinite; }
+
+        @keyframes pulse {
+            0% { box-shadow: 0 0 0 0 rgba(255,23,68,0.4); }
+            70% { box-shadow: 0 0 0 10px rgba(255,23,68,0); }
+            100% { box-shadow: 0 0 0 0 rgba(255,23,68,0); }
+        }
+
+        /* Error Board Container */
+        .error-board {
+            background-color: #1a0b0f;
+            color: #ff8a80;
+            font-family: 'JetBrains Mono', monospace;
+            padding: 20px;
+            border-radius: 12px;
+            height: 350px;
+            overflow-y: auto;
+            font-size: 13px;
+            border: 1px solid #ff1744;
+            line-height: 1.8;
+            box-shadow: inset 0 0 20px rgba(255,23,68,0.15);
+        }
+        .error-board-title {
+            color: #ff1744;
+            font-size: 1.2rem;
+            font-weight: 800;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        /* Standard Terminal Container */
         .terminal-log {
             background-color: #080810;
             color: #c8d6e5;
-            font-family: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
+            font-family: 'JetBrains Mono', monospace;
             padding: 16px;
             border-radius: 10px;
-            height: 500px;
+            height: 600px;
             overflow-y: auto;
-            font-size: 11px;
+            font-size: 12px;
             border: 1px solid #1a1a2e;
             line-height: 1.7;
-            box-shadow: inset 0 2px 8px rgba(0,0,0,0.5);
         }
 
         /* Terminal Keyword Highlights */
-        .log-error    { color: #ff4757; font-weight: 600; }
-        .log-warning  { color: #ffa502; }
-        .log-success  { color: #2ed573; font-weight: 600; }
-        .log-info     { color: #70a1ff; }
-        .log-sniper   { color: #00d2d3; font-weight: 700; }
-        .log-scout    { color: #54a0ff; font-weight: 700; }
-        .log-promoted { color: #feca57; font-weight: 700; text-decoration: underline; }
-        .log-preflight{ color: #c56cf0; font-weight: 600; }
-        .log-tx       { color: #ff6348; font-weight: 700; }
+        .log-time     { opacity: 0.5; font-size: 10px; margin-right: 8px; }
+        .log-error    { color: #ff1744; font-weight: bold; }
+        .log-warning  { color: #ff9100; font-weight: bold; }
+        .log-success  { color: #00e676; font-weight: bold; }
+        .log-info     { color: #8c9eff; }
+        .log-sniper   { color: #00e5ff; font-weight: 700; }
+        .log-scout    { color: #b388ff; font-weight: 700; }
+        .log-tx       { color: #ffff00; font-weight: 700; }
 
-        /* Tier Badges */
-        .tier-1-badge {
-            display: inline-block;
-            background: linear-gradient(135deg, #ff4757, #c0392b);
-            color: white;
-            padding: 2px 10px;
-            border-radius: 12px;
-            font-weight: 700;
-            font-size: 0.75rem;
-            letter-spacing: 0.04em;
+        /* Streamlit Tab Styling override */
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 24px;
+            background-color: transparent;
         }
-        .tier-2-badge {
-            display: inline-block;
-            background: linear-gradient(135deg, #ffa502, #e67e22);
-            color: white;
-            padding: 2px 10px;
-            border-radius: 12px;
-            font-weight: 700;
-            font-size: 0.75rem;
-            letter-spacing: 0.04em;
+        .stTabs [data-baseweb="tab"] {
+            height: 50px;
+            white-space: pre-wrap;
+            background-color: transparent;
+            border-radius: 8px 8px 0px 0px;
+            gap: 1px;
+            padding-top: 10px;
+            padding-bottom: 10px;
+            padding-left: 20px;
+            padding-right: 20px;
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: #8c9eff;
         }
-        .arb-badge {
-            display: inline-block;
-            background: linear-gradient(135deg, #1e90ff, #0052cc);
-            color: white;
-            padding: 2px 10px;
-            border-radius: 12px;
-            font-weight: 700;
-            font-size: 0.75rem;
-            letter-spacing: 0.04em;
+        .stTabs [data-baseweb="tab"]:hover {
+            color: #ffffff;
+            background-color: rgba(140, 158, 255, 0.1);
         }
+        .stTabs [aria-selected="true"] {
+            background-color: rgba(0, 176, 255, 0.15) !important;
+            color: #00b0ff !important;
+            border-bottom: 2px solid #00b0ff;
+        }
+
+        /* Section Headers */
+        h2, h3 { color: #f1f2f6 !important; font-weight: 700 !important; letter-spacing: 0.02em; }
+        
+        hr { border-color: rgba(255,255,255,0.1); margin: 2rem 0; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -152,33 +220,21 @@ st.markdown("""
 # =====================================================================
 
 def normalize_dataframe(df):
-    """
-    Intelligently renames and standardizes dataframe columns.
-    Ensures safe types for Plotly and Streamlit.
-    """
     if df.empty:
         return pd.DataFrame(columns=['Address', 'Health Factor', 'Debt (USD)', 'Collateral (USD)', 'Updated'])
 
     rename_map = {
         'address': 'Address',
         'health_factor': 'Health Factor',
-        'healthFactor': 'Health Factor',
-        'hf': 'Health Factor',
         'total_debt_usd': 'Debt (USD)',
-        'totalDebtBase': 'Debt (USD)',
-        'debtToCover': 'Debt (USD)',
         'total_collateral_usd': 'Collateral (USD)',
-        'totalCollateralBase': 'Collateral (USD)',
         'updated_at': 'Updated'
     }
     df = df.rename(columns=rename_map)
 
-    if 'Health Factor' in df.columns:
-        df['Health Factor'] = pd.to_numeric(df['Health Factor'], errors='coerce')
-    if 'Debt (USD)' in df.columns:
-        df['Debt (USD)'] = pd.to_numeric(df['Debt (USD)'], errors='coerce')
-    if 'Collateral (USD)' in df.columns:
-        df['Collateral (USD)'] = pd.to_numeric(df['Collateral (USD)'], errors='coerce')
+    if 'Health Factor' in df.columns: df['Health Factor'] = pd.to_numeric(df['Health Factor'], errors='coerce')
+    if 'Debt (USD)' in df.columns: df['Debt (USD)'] = pd.to_numeric(df['Debt (USD)'], errors='coerce')
+    if 'Collateral (USD)' in df.columns: df['Collateral (USD)'] = pd.to_numeric(df['Collateral (USD)'], errors='coerce')
 
     return df
 
@@ -195,8 +251,7 @@ def get_db_connection():
 
 def safe_query(query, params=None):
     conn = get_db_connection()
-    if not conn:
-        return pd.DataFrame()
+    if not conn: return pd.DataFrame()
     try:
         df = pd.read_sql_query(query, conn, params=params)
         conn.close()
@@ -207,17 +262,13 @@ def safe_query(query, params=None):
 
 
 def load_live_targets():
-    df = safe_query(
-        "SELECT address, health_factor, total_debt_usd, total_collateral_usd, updated_at "
-        "FROM live_targets ORDER BY health_factor ASC"
-    )
+    df = safe_query("SELECT address, health_factor, total_debt_usd, total_collateral_usd, updated_at FROM live_targets ORDER BY health_factor ASC")
     return normalize_dataframe(df)
 
 
 def load_summary():
     conn = get_db_connection()
-    if not conn:
-        return {}
+    if not conn: return {}
     try:
         cur = conn.cursor()
         cur.execute('''
@@ -242,484 +293,381 @@ def load_summary():
         return {}
 
 
-def load_metrics(limit=100):
-    try:
-        return safe_query(
-            "SELECT block_number, target_count, tier_1_count, tier_2_count, scan_time_ms, timestamp "
-            "FROM system_metrics ORDER BY id DESC LIMIT ?", (limit,)
-        )
-    except Exception:
-        return safe_query(
-            "SELECT block_number, target_count, 0 as tier_1_count, 0 as tier_2_count, scan_time_ms, timestamp "
-            "FROM system_metrics ORDER BY id DESC LIMIT ?", (limit,)
-        )
-
-
-def load_logs(limit=200):
+def load_logs(limit=300):
     return safe_query("SELECT timestamp, level, message FROM logs ORDER BY id DESC LIMIT ?", (limit,))
 
 
-def load_executions(limit=50):
-    return safe_query(
-        "SELECT timestamp, tx_hash, user_address, profit_usdc, profit_eth "
-        "FROM executions ORDER BY id DESC LIMIT ?", (limit,)
-    )
+def get_critical_logs_sync(limit=20):
+    """Direct DB call matching db_manager logic to grab recent warnings/errors."""
+    conn = get_db_connection()
+    if not conn: return []
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT timestamp, level, message FROM logs WHERE upper(level) IN ('ERROR', 'WARNING') ORDER BY id DESC LIMIT ?", (limit,))
+        rows = cur.fetchall()
+        conn.close()
+        return rows
+    except Exception:
+        return []
 
+
+def load_executions(limit=100):
+    return safe_query("SELECT timestamp, tx_hash, user_address, profit_usdc, profit_eth FROM executions ORDER BY id DESC LIMIT ?", (limit,))
 
 def load_total_profits():
     conn = get_db_connection()
-    if not conn:
-        return 0.0, 0.0
+    if not conn: return 0.0, 0.0
     try:
         cur = conn.cursor()
         cur.execute("SELECT COALESCE(SUM(profit_eth), 0), COALESCE(SUM(profit_usdc), 0) FROM executions")
         r = cur.fetchone()
         conn.close()
-        return r[0], r[1]
+        return float(r[0]), float(r[1])
     except Exception:
         return 0.0, 0.0
 
+def load_exec_count():
+    conn = get_db_connection()
+    if not conn: return 0
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM executions")
+        r = cur.fetchone()
+        conn.close()
+        return int(r[0])
+    except Exception:
+        return 0
 
-def load_targets_json():
-    paths = ["/root/Arbitrum/targets.json", "targets.json"]
-    for path in paths:
-        if os.path.exists(path):
-            try:
-                with open(path, 'r') as f:
-                    content = f.read().strip()
-                    if not content:
-                        return [], []
-                    data = json.loads(content)
-                    if isinstance(data, dict):
-                        return data.get("tier_1_danger", []), data.get("tier_2_watchlist", [])
-                    elif isinstance(data, list):
-                        return data, []
-            except Exception:
-                pass
-    return [], []
+# --- Arb Loaders ---
 
+def load_arb_executions(limit=100):
+    return safe_query("SELECT timestamp, tx_hash, token_pair, dex_a, dex_b, profit_usd FROM arb_executions ORDER BY id DESC LIMIT ?", (limit,))
 
-def load_logs_fallback(limit=100):
-    """Reads actual log files if DB logs are empty."""
-    log_paths = [
-        os.path.expanduser("~/.pm2/logs/ArbitrumBot-out.log"),
-        os.path.expanduser("~/.pm2/logs/ArbitrumBot-error.log"),
-        "bot.log"
-    ]
-    lines = []
-    for path in log_paths:
-        if os.path.exists(path):
-            try:
-                with open(path, 'r', errors='ignore') as f:
-                    all_lines = f.readlines()
-                    lines.extend(all_lines[-limit:])
-            except Exception:
-                continue
-
-    processed = []
-    for line in lines[-limit:]:
-        processed.append({
-            'timestamp': datetime.now().strftime('%H:%M:%S'),
-            'level': 'INFO',
-            'message': line.strip()
-        })
-    return pd.DataFrame(processed) if processed else pd.DataFrame()
-
-
-# =====================================================================
-# ARBITRAGE DATA LOADERS
-# =====================================================================
-
-def load_arb_executions(limit=50):
-    """Load recent arbitrage executions for the data grid."""
-    return safe_query(
-        "SELECT timestamp, tx_hash, token_pair, dex_a, dex_b, profit_usd "
-        "FROM arb_executions ORDER BY id DESC LIMIT ?", (limit,)
-    )
-
-
-def load_arb_spreads(limit=300):
-    """Load recent spreads for the live chart."""
-    return safe_query(
-        "SELECT token_pair, dex_a, dex_b, spread_percent, timestamp "
-        "FROM arb_spreads ORDER BY id DESC LIMIT ?", (limit,)
-    )
-
+def load_arb_spreads(limit=500):
+    return safe_query("SELECT token_pair, dex_a, dex_b, spread_percent, timestamp FROM arb_spreads ORDER BY id DESC LIMIT ?", (limit,))
 
 def load_arb_total_profit():
-    """Load total arb profit in USD."""
     conn = get_db_connection()
-    if not conn:
-        return 0.0
+    if not conn: return 0.0
     try:
         cur = conn.cursor()
         cur.execute("SELECT COALESCE(SUM(profit_usd), 0) FROM arb_executions")
         r = cur.fetchone()
         conn.close()
-        return r[0] if r[0] else 0.0
+        return float(r[0]) if r[0] else 0.0
     except Exception:
         return 0.0
 
-
 def load_arb_execution_count():
-    """Total arb executions."""
     conn = get_db_connection()
-    if not conn:
-        return 0
+    if not conn: return 0
     try:
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*) FROM arb_executions")
         r = cur.fetchone()
         conn.close()
-        return r[0] if r[0] else 0
+        return int(r[0]) if r[0] else 0
     except Exception:
         return 0
 
-
-def load_active_spreads_count(minutes=60):
-    """Count of spreads found in the last N minutes."""
+def load_active_spreads_count(minutes=1440): # Default to 24H
     conn = get_db_connection()
-    if not conn:
-        return 0
+    if not conn: return 0
     try:
         cur = conn.cursor()
-        cur.execute('''
-            SELECT COUNT(*) FROM arb_spreads
-            WHERE timestamp >= datetime('now', ? || ' minutes')
-        ''', (f"-{minutes}",))
+        cur.execute("SELECT COUNT(*) FROM arb_spreads WHERE timestamp >= datetime('now', ? || ' minutes')", (f"-{minutes}",))
         r = cur.fetchone()
         conn.close()
-        return r[0] if r[0] else 0
+        return int(r[0]) if r[0] else 0
     except Exception:
         return 0
 
-
 # =====================================================================
-# TERMINAL HIGHLIGHTER
+# PM2 FLEET MONITOR
 # =====================================================================
 
-def highlight_log_line(message, level):
-    msg = str(message).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+def get_pm2_status():
+    """Parses `pm2 jlist` to get the live status of the fleet."""
+    try:
+        # Require pm2 in PATH.
+        output = subprocess.check_output(['pm2', 'jlist'], stderr=subprocess.DEVNULL)
+        processes = json.loads(output)
+        
+        fleet_data = []
+        for p in processes:
+            name = p.get('name', 'Unknown')
+            pm2_env = p.get('pm2_env', {})
+            status = pm2_env.get('status', 'offline')
+            restart_count = pm2_env.get('restart_time', 0)
+            
+            # Memory
+            monit = p.get('monit', {})
+            mem_mb = monit.get('memory', 0) / (1024 * 1024)
+            
+            # Uptime calc
+            uptime_ms = int(time.time() * 1000) - pm2_env.get('pm_uptime', 0)
+            if status != 'online' or pm2_env.get('pm_uptime', 0) == 0:
+                uptime_str = "-"
+            else:
+                m, s = divmod(uptime_ms // 1000, 60)
+                h, m = divmod(m, 60)
+                d, h = divmod(h, 24)
+                if d > 0: uptime_str = f"{d}d {h}h {m}m"
+                elif h > 0: uptime_str = f"{h}h {m}m {s}s"
+                else: uptime_str = f"{m}m {s}s"
 
-    if "[SNIPER]" in msg:
-        msg = msg.replace("[SNIPER]", '<span class="log-sniper">[SNIPER]</span>')
-    if "[SCOUT]" in msg:
-        msg = msg.replace("[SCOUT]", '<span class="log-scout">[SCOUT]</span>')
-    if "PROMOTED" in msg.upper():
-        msg = re.sub(r'(PROMOTED)', r'<span class="log-promoted">\1</span>', msg, flags=re.IGNORECASE)
-    if any(x in msg.upper() for x in ["PRE-FLIGHT", "SIMULATION"]):
-        msg = re.sub(r'(Pre-flight|PRE-FLIGHT|Simulation|simulate)', r'<span class="log-preflight">\1</span>', msg, flags=re.IGNORECASE)
-    if any(x in msg.upper() for x in ["TX SENT", "TX CONFIRMED", "TX REVERTED"]):
-        msg = re.sub(r'(TX SENT|TX CONFIRMED|TX REVERTED)', r'<span class="log-tx">\1</span>', msg, flags=re.IGNORECASE)
-
-    level_lower = str(level).lower()
-    css_class = {
-        'error': 'log-error', 'warning': 'log-warning',
-        'success': 'log-success'
-    }.get(level_lower, 'log-info')
-
-    return f'<span class="{css_class}">{msg}</span>'
-
+            fleet_data.append({
+                "Name": name,
+                "Status": status,
+                "Memory": f"{mem_mb:.1f} MB",
+                "Restarts": restart_count,
+                "Uptime": uptime_str
+            })
+        return fleet_data
+    except Exception as e:
+        return [{"Name": "PM2 Error", "Status": "offline", "Memory": "-", "Restarts": "-", "Uptime": str(e)}]
 
 # =====================================================================
 # UI LAYOUT
 # =====================================================================
 
 if HAS_AUTOREFRESH:
-    st_autorefresh(interval=5000, limit=None, key="dashboard_refresh")
+    st_autorefresh(interval=3000, limit=None, key="dashboard_refresh")
 
 st.markdown(
     '<div class="header-bar">'
-    '🛸 ANTI-GRAVITY — Mission Control &nbsp;|&nbsp; '
-    '<span style="font-size: 0.8rem; opacity: 0.7;">MEV Platform v2.0 • Liquidations + DEX Arb • Arbitrum One</span>'
+    '<span><i class="fas fa-satellite-dish"></i> 🛸 ANTI-GRAVITY — Executive Command Center</span>'
+    '<span style="font-size: 0.9rem; color: #00e5ff;">SYSTEM: <span style="color:#00e676">ONLINE</span> &nbsp; | &nbsp; ENV: ARBITRUM</span>'
     '</div>',
     unsafe_allow_html=True
 )
 
-# Sidebar
-with st.sidebar:
-    st.title("🛸 Anti-Gravity")
-    st.divider()
-    st.metric("System Status", "ONLINE", delta="Active", delta_color="normal")
-    total_eth, total_usdc = load_total_profits()
-    st.metric("Liquidation Profit (USDC)", f"${total_usdc:,.2f}")
-    arb_profit = load_arb_total_profit()
-    st.metric("Arb Profit (USD)", f"${arb_profit:,.2f}")
-    st.divider()
-    t1_json, t2_json = load_targets_json()
-    st.markdown(f'<span class="tier-1-badge">TIER 1</span> &nbsp; **{len(t1_json)}** targets', unsafe_allow_html=True)
-    st.markdown(f'<span class="tier-2-badge">TIER 2</span> &nbsp; **{len(t2_json)}** targets', unsafe_allow_html=True)
-    st.markdown(f'<span class="arb-badge">ARB ENGINE</span> &nbsp; **{load_arb_execution_count()}** trades', unsafe_allow_html=True)
-    st.divider()
-    if st.button("🔄 Refresh Data", use_container_width=True):
-        st.rerun()
 
-# KPIs
+# Fetch Global Data
 summary = load_summary()
-k1, k2, k3, k4 = st.columns(4)
-with k1:
-    st.markdown('<div class="kpi-info">', unsafe_allow_html=True)
-    st.metric("📡 Total Live Targets", f"{summary.get('total_count', 0)}")
-    st.markdown('</div>', unsafe_allow_html=True)
-with k2:
-    st.markdown('<div class="kpi-danger">', unsafe_allow_html=True)
-    st.metric("🔴 Tier 1 (Danger)", f"{summary.get('danger_count', 0)}")
-    st.markdown('</div>', unsafe_allow_html=True)
-with k3:
-    st.markdown('<div class="kpi-warning">', unsafe_allow_html=True)
-    st.metric("🟠 Tier 2 (Watchlist)", f"{summary.get('watchlist_count', 0)}")
-    st.markdown('</div>', unsafe_allow_html=True)
-with k4:
-    total_risk = summary.get('danger_debt', 0) + summary.get('watchlist_debt', 0)
-    st.markdown('<div class="kpi-danger">', unsafe_allow_html=True)
-    st.metric("💰 Value at Risk", f"${total_risk:,.0f}")
-    st.markdown('</div>', unsafe_allow_html=True)
+_, liq_usdc = load_total_profits()
+arb_usd = load_arb_total_profit()
+total_net_profit = liq_usdc + arb_usd
 
-st.divider()
+liq_execs = load_exec_count()
+arb_execs = load_arb_execution_count()
+total_hunts = liq_execs + arb_execs
+
+value_at_risk = summary.get('danger_debt', 0) + summary.get('watchlist_debt', 0)
+active_spreads_24h = load_active_spreads_count(1440)
+
 
 # ── TABS ──
-tab_radar, tab_danger, tab_watch, tab_exec, tab_arb, tab_term = st.tabs([
-    "📡 Radar", "🔴 Danger Zone", "🟠 Watchlist", "⚔️ Executions", "🔄 DEX Arbitrage", "📜 Live Terminal"
+tab_main, tab_liq, tab_arb, tab_term = st.tabs([
+    "🌍 Main Command", "⚔️ Liquidations", "🔄 Arbitrage", "📜 Full Terminal"
 ])
 
-# ─── RADAR ────────────────────────────────
-with tab_radar:
-    st.subheader("🎯 Target Radar — Health Factor vs Debt")
-    df_all = load_live_targets()
-
-    if not df_all.empty and 'Health Factor' in df_all.columns:
-        df_radar = df_all[(df_all['Health Factor'] > 0) & (df_all['Health Factor'] < 1.25)].copy()
-
-        if not df_radar.empty:
-            df_radar['Tier'] = df_radar['Health Factor'].apply(
-                lambda hf: '🔴 Tier 1 (Danger)' if hf < 1.05 else '🟠 Tier 2 (Watchlist)'
-            )
-            df_radar['Short Address'] = df_radar['Address'].apply(
-                lambda a: f"{str(a)[:6]}...{str(a)[-4:]}"
-            )
-
-            fig = px.scatter(
-                df_radar, x='Health Factor', y='Debt (USD)',
-                color='Tier',
-                color_discrete_map={'🔴 Tier 1 (Danger)': '#ff4757', '🟠 Tier 2 (Watchlist)': '#ffa502'},
-                size='Debt (USD)', size_max=40,
-                hover_data=['Short Address', 'Collateral (USD)'],
-                labels={'Health Factor': 'HF'}
-            )
-
-            fig.add_vline(x=1.0, line_dash="dash", line_color="#ff4757", annotation_text="LIQUIDATION")
-            fig.update_layout(
-                template="plotly_dark", height=500,
-                xaxis=dict(range=[0.95, 1.25], gridcolor='rgba(255,255,255,0.05)'),
-                yaxis=dict(gridcolor='rgba(255,255,255,0.05)'),
-                font=dict(family="JetBrains Mono"),
-                legend=dict(orientation="h", y=1.02, x=1)
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("📡 No targets in visual range (0 < HF < 1.25).")
-    else:
-        st.info("🔍 No live target data available.")
-
-# ─── DANGER ZONE ──────────────────────────
-with tab_danger:
-    df_all = load_live_targets()
-    if not df_all.empty and 'Health Factor' in df_all.columns:
-        df_t1 = df_all[(df_all['Health Factor'] > 0) & (df_all['Health Factor'] < 1.05)].copy()
-        if not df_t1.empty:
-            c1, c2 = st.columns([1, 2])
-            with c1:
-                fig = px.histogram(df_t1, x='Health Factor', nbins=20, color_discrete_sequence=['#ff4757'])
-                fig.update_layout(template="plotly_dark", height=350, margin=dict(l=20, r=20, t=20, b=20))
-                st.plotly_chart(fig, use_container_width=True)
-            with c2:
-                st.dataframe(
-                    df_t1, height=350, hide_index=True,
-                    column_config={
-                        "Debt (USD)": st.column_config.NumberColumn(format="$%.2f"),
-                        "Collateral (USD)": st.column_config.NumberColumn(format="$%.2f"),
-                        "Health Factor": st.column_config.NumberColumn(format="%.4f"),
-                    },
-                    use_container_width=True,
-                )
-        else:
-            st.success("✅ No Tier 1 targets.")
-    else:
-        st.info("🔍 No data.")
-
-# ─── WATCHLIST ────────────────────────────
-with tab_watch:
-    df_all = load_live_targets()
-    if not df_all.empty and 'Health Factor' in df_all.columns:
-        df_t2 = df_all[(df_all['Health Factor'] >= 1.05) & (df_all['Health Factor'] < 1.20)].copy()
-        if not df_t2.empty:
-            c1, c2 = st.columns([1, 2])
-            with c1:
-                fig = px.histogram(df_t2, x='Health Factor', nbins=20, color_discrete_sequence=['#ffa502'])
-                fig.update_layout(template="plotly_dark", height=350, margin=dict(l=20, r=20, t=20, b=20))
-                st.plotly_chart(fig, use_container_width=True)
-            with c2:
-                st.dataframe(
-                    df_t2, height=350, hide_index=True,
-                    column_config={
-                        "Debt (USD)": st.column_config.NumberColumn(format="$%.2f"),
-                        "Collateral (USD)": st.column_config.NumberColumn(format="$%.2f"),
-                        "Health Factor": st.column_config.NumberColumn(format="%.4f"),
-                    },
-                    use_container_width=True,
-                )
-        else:
-            st.info("📋 Watchlist empty.")
-    else:
-        st.info("🔍 No data.")
-
-# ─── EXECUTIONS ───────────────────────────
-with tab_exec:
-    df_exec = load_executions()
-    if not df_exec.empty:
-        st.dataframe(
-            df_exec, hide_index=True,
-            column_config={
-                "profit_usdc": st.column_config.NumberColumn("Profit (USD)", format="$%.2f"),
-                "profit_eth": st.column_config.NumberColumn("Profit (ETH)", format="%.4f"),
-            },
-            use_container_width=True,
-        )
-    else:
-        st.info("🏹 No liquidations yet.")
-
-# ─── DEX ARBITRAGE ────────────────────────
-with tab_arb:
-    st.subheader("🔄 DEX Arbitrage — Cross-Exchange Spread Monitor")
-
-    # ── Metrics Row ──
-    arb_k1, arb_k2, arb_k3 = st.columns(3)
-    with arb_k1:
+# ─── 1. MAIN COMMAND (The Exec View) ────────────────────────────────
+with tab_main:
+    
+    # ROW 1: THE MONEY BOARD
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
         st.markdown('<div class="kpi-profit">', unsafe_allow_html=True)
-        arb_total = load_arb_total_profit()
-        st.metric("💰 Total Arb Profit (USD)", f"${arb_total:,.2f}")
+        st.metric("💸 Total Net Profit", f"${total_net_profit:,.2f}")
         st.markdown('</div>', unsafe_allow_html=True)
-    with arb_k2:
+    with k2:
+        st.markdown('<div class="kpi-hunts">', unsafe_allow_html=True)
+        st.metric("🎯 Successful Hunts", f"{total_hunts}")
+        st.markdown('</div>', unsafe_allow_html=True)
+    with k3:
+        st.markdown('<div class="kpi-danger">', unsafe_allow_html=True)
+        st.metric("💣 Value at Risk", f"${value_at_risk:,.0f}")
+        st.markdown('</div>', unsafe_allow_html=True)
+    with k4:
         st.markdown('<div class="kpi-arb">', unsafe_allow_html=True)
-        active_count = load_active_spreads_count(60)
-        st.metric("📊 Active Spreads (Last 1H)", f"{active_count}")
+        st.metric("📈 24H Active Spreads", f"{active_spreads_24h}")
         st.markdown('</div>', unsafe_allow_html=True)
-    with arb_k3:
-        st.markdown('<div class="kpi-safe">', unsafe_allow_html=True)
-        exec_count = load_arb_execution_count()
-        st.metric("✅ Successful Executions", f"{exec_count}")
-        st.markdown('</div>', unsafe_allow_html=True)
+        
+    st.markdown("<hr style='border: 1px solid rgba(0,176,255,0.2); margin: 30px 0;'>", unsafe_allow_html=True)
 
-    st.divider()
+    # ROW 2 & 3: FLEET HEALTH & ERROR BOARD
+    col_fleet, col_errors = st.columns([1.5, 1])
+    
+    with col_fleet:
+        st.markdown("<h3>🚢 Live PM2 Fleet Health</h3>", unsafe_allow_html=True)
+        fleet_data = get_pm2_status()
+        
+        # Build HTML Table
+        table_html = "<table class='fleet-table'><tr><th>Bot Engine</th><th>Status</th><th>RAM</th><th>Restarts</th><th>Uptime</th></tr>"
+        for row in fleet_data:
+            c_status = "status-online" if row['Status'] == 'online' else "status-offline"
+            i_status = "🟢 ONLINE" if row['Status'] == 'online' else "🔴 OFFLINE"
+            
+            table_html += f"<tr>"
+            table_html += f"<td>{row['Name']}</td>"
+            table_html += f"<td><span class='{c_status}'>{i_status}</span></td>"
+            table_html += f"<td>{row['Memory']}</td>"
+            table_html += f"<td>{row['Restarts']}</td>"
+            table_html += f"<td>{row['Uptime']}</td>"
+            table_html += f"</tr>"
+        table_html += "</table>"
+        
+        st.markdown(table_html, unsafe_allow_html=True)
 
-    # ── Live Spread Chart ──
-    st.subheader("📈 Live Spread % Over Time")
+    with col_errors:
+        st.markdown(
+            '<div class="error-board-title">'
+            '⚠️ CRITICAL ALERT MONITOR'
+            '</div>', 
+        unsafe_allow_html=True)
+        
+        c_logs = get_critical_logs_sync(15)
+        if c_logs:
+            err_html = ""
+            for r in c_logs:
+                # Colorize based on severity
+                color = "#ff1744" if r['level'].upper() == "ERROR" else "#ff9100"
+                err_html += f"<span style='color: rgba(255,255,255,0.4); font-size: 11px;'>[{r['timestamp'][11:19]}]</span> "
+                err_html += f"<strong style='color:{color}'>[{r['level'].upper()}]</strong> "
+                
+                # HTML escape message
+                msg = str(r['message']).replace("<", "&lt;").replace(">", "&gt;")
+                err_html += f"{msg}<br>"
+                
+            st.markdown(f'<div class="error-board">{err_html}</div>', unsafe_allow_html=True)
+        else:
+            st.markdown(
+                '<div class="error-board" style="display:flex; justify-content:center; align-items:center;">'
+                '<span style="color:#00e676; font-size:1.5rem; font-weight:bold;">✅ ALL SYSTEMS NOMINAL</span>'
+                '</div>', unsafe_allow_html=True)
+
+
+# ─── 2. LIQUIDATIONS (Combined View) ────────────────────────────────
+with tab_liq:
+    df_all = load_live_targets()
+    
+    liq_c1, liq_c2 = st.columns([1, 1])
+    
+    with liq_c1:
+        st.markdown("<h3>🎯 Target Radar</h3>", unsafe_allow_html=True)
+        if not df_all.empty and 'Health Factor' in df_all.columns:
+            df_radar = df_all[(df_all['Health Factor'] > 0) & (df_all['Health Factor'] < 1.25)].copy()
+            if not df_radar.empty:
+                df_radar['Tier'] = df_radar['Health Factor'].apply(lambda hf: '🔴 Tier 1 (Danger)' if hf < 1.05 else '🟠 Tier 2 (Watchlist)')
+                df_radar['Short Address'] = df_radar['Address'].apply(lambda a: f"{str(a)[:6]}...{str(a)[-4:]}")
+
+                fig = px.scatter(
+                    df_radar, x='Health Factor', y='Debt (USD)', color='Tier',
+                    color_discrete_map={'🔴 Tier 1 (Danger)': '#ff1744', '🟠 Tier 2 (Watchlist)': '#ff9100'},
+                    size='Debt (USD)', size_max=35, hover_data=['Short Address', 'Collateral (USD)', 'Health Factor']
+                )
+                fig.add_vline(x=1.0, line_dash="dash", line_color="#ff1744", annotation_text="LIQUIDATION")
+                fig.update_layout(template="plotly_dark", height=400, margin=dict(l=0,r=0,t=0,b=0), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("📡 No targets in visual range (HF < 1.25).")
+        else:
+            st.info("🔍 No live target data available.")
+
+        st.markdown("<h3>💣 Danger Zone (Tier 1)</h3>", unsafe_allow_html=True)
+        if not df_all.empty:
+            df_t1 = df_all[(df_all['Health Factor'] > 0) & (df_all['Health Factor'] < 1.05)].copy()
+            if not df_t1.empty:
+                st.dataframe(df_t1, hide_index=True, height=250, use_container_width=True,
+                    column_config={
+                        "Debt (USD)": st.column_config.NumberColumn(format="$%.2f"),
+                        "Collateral (USD)": st.column_config.NumberColumn(format="$%.2f"),
+                        "Health Factor": st.column_config.NumberColumn(format="%.4f")
+                    })
+            else:
+                st.success("✅ Clear.")
+
+    with liq_c2:
+        st.markdown("<h3>⚔️ Liquidation History</h3>", unsafe_allow_html=True)
+        df_exec = load_executions(100)
+        if not df_exec.empty:
+            st.dataframe(df_exec, hide_index=True, height=400, use_container_width=True,
+                column_config={
+                    "profit_usdc": st.column_config.NumberColumn("Profit (USD)", format="$%.2f"),
+                    "profit_eth": st.column_config.NumberColumn("Profit (ETH)", format="%.4f"),
+                })
+        else:
+            st.info("🏹 No liquidations yet.")
+            
+        st.markdown("<h3>🟠 Watchlist (Tier 2)</h3>", unsafe_allow_html=True)
+        if not df_all.empty:
+            df_t2 = df_all[(df_all['Health Factor'] >= 1.05) & (df_all['Health Factor'] < 1.20)].copy()
+            if not df_t2.empty:
+                st.dataframe(df_t2, hide_index=True, height=250, use_container_width=True,
+                    column_config={
+                        "Debt (USD)": st.column_config.NumberColumn(format="$%.2f"),
+                        "Collateral (USD)": st.column_config.NumberColumn(format="$%.2f"),
+                        "Health Factor": st.column_config.NumberColumn(format="%.4f")
+                    })
+            else:
+                st.info("📋 Empty.")
+
+
+# ─── 3. ARBITRAGE ────────────────────────────────
+with tab_arb:
+    st.markdown("<h3>📈 Live DEX Spreads (Last 300)</h3>", unsafe_allow_html=True)
     df_spreads = load_arb_spreads(300)
 
     if not df_spreads.empty:
-        # Ensure timestamp is datetime for proper plotting
         df_spreads['timestamp'] = pd.to_datetime(df_spreads['timestamp'], errors='coerce')
-        df_spreads = df_spreads.dropna(subset=['timestamp'])
-        df_spreads = df_spreads.sort_values('timestamp', ascending=True)
-
-        # Create label column for legend
-        df_spreads['pair_route'] = df_spreads['token_pair'] + " (" + df_spreads['dex_a'] + " → " + df_spreads['dex_b'] + ")"
+        df_spreads = df_spreads.dropna(subset=['timestamp']).sort_values('timestamp', ascending=True)
 
         fig_spread = px.line(
-            df_spreads,
-            x='timestamp',
-            y='spread_percent',
-            color='token_pair',
-            labels={'spread_percent': 'Spread %', 'timestamp': 'Time'},
-            color_discrete_sequence=[
-                '#1e90ff', '#ff4757', '#2ed573', '#ffa502',
-                '#c56cf0', '#00d2d3', '#feca57',
-            ],
+            df_spreads, x='timestamp', y='spread_percent', color='token_pair',
+            color_discrete_sequence=['#00b0ff', '#ff1744', '#00e676', '#ff9100', '#d500f9', '#ffea00'],
         )
-
+        fig_spread.add_hline(y=0.08, line_dash="dot", line_color="rgba(0, 230, 118, 0.6)", annotation_text="Profit Threshold")
         fig_spread.update_layout(
-            template="plotly_dark",
-            height=400,
-            xaxis=dict(gridcolor='rgba(255,255,255,0.05)'),
-            yaxis=dict(
-                gridcolor='rgba(255,255,255,0.05)',
-                title="Spread %",
-            ),
-            font=dict(family="JetBrains Mono"),
-            legend=dict(orientation="h", y=-0.15, x=0, font=dict(size=10)),
-            margin=dict(l=40, r=20, t=30, b=60),
+            template="plotly_dark", height=450, margin=dict(l=10, r=10, t=10, b=10),
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0.2)"
         )
-
-        # Add profitability threshold line
-        fig_spread.add_hline(
-            y=0.08,
-            line_dash="dot",
-            line_color="rgba(46, 213, 115, 0.5)",
-            annotation_text="Profit Threshold",
-            annotation_font_color="rgba(46, 213, 115, 0.7)",
-        )
-
         st.plotly_chart(fig_spread, use_container_width=True)
     else:
-        st.info("📊 No spread data yet. Start the arb_engine.py to begin scanning.")
+        st.info("📊 No spread data yet.")
 
-    st.divider()
-
-    # ── Historical Arb Executions Grid ──
-    st.subheader("📋 Arbitrage Execution History")
-    df_arb_exec = load_arb_executions(50)
-
+    st.markdown("<h3>📋 Arbitrage Executions</h3>", unsafe_allow_html=True)
+    df_arb_exec = load_arb_executions(100)
     if not df_arb_exec.empty:
         st.dataframe(
-            df_arb_exec,
-            hide_index=True,
+            df_arb_exec, hide_index=True, use_container_width=True, height=400,
             column_config={
-                "timestamp": st.column_config.TextColumn("Timestamp"),
-                "tx_hash": st.column_config.TextColumn("TX Hash"),
-                "token_pair": st.column_config.TextColumn("Pair"),
-                "dex_a": st.column_config.TextColumn("Buy DEX"),
-                "dex_b": st.column_config.TextColumn("Sell DEX"),
                 "profit_usd": st.column_config.NumberColumn("Profit (USD)", format="$%.2f"),
-            },
-            use_container_width=True,
+                "timestamp": st.column_config.TextColumn("Time")
+            }
         )
     else:
         st.info("🔄 No arbitrage executions recorded yet.")
 
 
-# ─── TERMINAL ─────────────────────────────
+# ─── 4. FULL TERMINAL ────────────────────────────────
 with tab_term:
-    st.caption("Highlights: [SNIPER] [SCOUT] PROMOTED Pre-flight TX SENT")
-    df_logs = load_logs(200)
-
-    # Fallback if DB empty
-    if df_logs.empty:
-        df_logs = load_logs_fallback(50)
+    st.caption("Complete combined system logs | Auto-refreshes every 3s")
+    df_logs = load_logs(400)
 
     if not df_logs.empty:
-        lines = []
+        log_html = ""
         for _, row in df_logs.iterrows():
-            msg = highlight_log_line(row['message'], row['level'])
-            lines.append(f'<span style="opacity:0.5; font-size:10px">[{row["timestamp"]}]</span> {msg}')
-        st.markdown(f'<div class="terminal-log">{"<br>".join(lines)}</div>', unsafe_allow_html=True)
+            msg = str(row['message']).replace("<", "&lt;").replace(">", "&gt;")
+            
+            # Syntax Highlighting
+            if "[SNIPER]" in msg: msg = msg.replace("[SNIPER]", '<span class="log-sniper">[SNIPER]</span>')
+            elif "[SCOUT]" in msg: msg = msg.replace("[SCOUT]", '<span class="log-scout">[SCOUT]</span>')
+            if "PROMOTED" in msg.upper(): msg = re.sub(r'(PROMOTED)', r'<span style="color:#ffea00;font-weight:bold;">\1</span>', msg, flags=re.IGNORECASE)
+            if "TX SENT" in msg.upper() or "TX CONFIRMED" in msg:
+                msg = re.sub(r'(TX SENT|TX CONFIRMED)', r'<span class="log-tx">\1</span>', msg, flags=re.IGNORECASE)
+
+            # Level Coloring
+            lev = str(row['level']).lower()
+            lvl_class = "log-info"
+            if lev == "error": lvl_class = "log-error"
+            elif lev == "warning": lvl_class = "log-warning"
+            elif lev == "success": lvl_class = "log-success"
+
+            ts = row["timestamp"][11:19] if len(row["timestamp"]) > 18 else str(row["timestamp"])
+
+            log_html += f'<span class="log-time">[{ts}]</span> <span class="{lvl_class}">{msg}</span><br>'
+
+        st.markdown(f'<div class="terminal-log">{log_html}</div>', unsafe_allow_html=True)
     else:
         st.info("📜 No logs available.")
-
-# ─── ANALYTICS ─────────────────────────────
-with st.expander("📊 Scan Performance", expanded=False):
-    df_m = load_metrics(100)
-    if not df_m.empty:
-        df_m = df_m.iloc[::-1]
-        c1, c2 = st.columns(2)
-        with c1:
-            fig = px.line(df_m, x='block_number', y='scan_time_ms', labels={'scan_time_ms': 'ms'})
-            fig.update_traces(line_color='#667eea')
-            fig.update_layout(template="plotly_dark", height=300)
-            st.plotly_chart(fig, use_container_width=True)
-        with c2:
-            fig = go.Figure(data=[
-                go.Bar(name='Tier 1', x=df_m['block_number'], y=df_m['tier_1_count'], marker_color='#ff4757'),
-                go.Bar(name='Tier 2', x=df_m['block_number'], y=df_m['tier_2_count'], marker_color='#ffa502')
-            ])
-            fig.update_layout(barmode='stack', template="plotly_dark", height=300)
-            st.plotly_chart(fig, use_container_width=True)
