@@ -18,6 +18,7 @@ class MarketSentinel:
         self.last_price = 0.0
         self.last_scan_time = 0
         self.current_price = 0.0
+        self.last_fail_time = 0
 
     async def fetch_price(self) -> float:
         """Fetches the current price of the asset from Binance API."""
@@ -47,7 +48,10 @@ class MarketSentinel:
 
         # 2. Connection Failure (Failsafe to scan)
         if self.current_price == 0.0:
-            return True
+            if current_time - self.last_fail_time >= 10:
+                self.last_fail_time = current_time
+                return True
+            return False
 
         # 3. First execution
         if self.last_price == 0.0:

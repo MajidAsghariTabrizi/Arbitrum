@@ -21,6 +21,7 @@ import os
 import json
 import logging
 import time
+import random
 import traceback
 from decimal import Decimal
 from market_sentinel import MarketSentinel
@@ -1182,6 +1183,8 @@ async def main():
             if not await sentinel.should_scan():
                 await asyncio.sleep(1)
                 continue
+
+            await asyncio.sleep(random.uniform(0.1, 0.8))
 
             current_block = await w3.eth.block_number
             

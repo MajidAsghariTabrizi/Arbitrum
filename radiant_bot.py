@@ -1,6 +1,7 @@
 import os
 import json
 import asyncio
+import random
 import logging
 import time
 import warnings
@@ -802,6 +803,8 @@ class RadiantBot:
                 if not await sentinel.should_scan():
                     await asyncio.sleep(1)
                     continue
+
+                await asyncio.sleep(random.uniform(0.1, 0.8))
 
                 current_block = await self.w3.eth.block_number
                 
