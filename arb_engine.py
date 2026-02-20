@@ -790,6 +790,18 @@ async def execute_arbitrage(
         logger.warning("⚠️  Cannot execute — contract address or private key missing")
         return None
 
+    # ── Unpack route_details ──
+    token_symbol = route_details["token_symbol"]
+    token_address = route_details["token_address"]
+    dex_a = route_details["dex_a"]
+    dex_b = route_details["dex_b"]
+    flashloan_usdc = route_details["flashloan_usdc"]
+    leg_a_token_out = route_details["leg_a_token_out"]
+    leg_b_usdc_out = route_details["leg_b_usdc_out"]
+
+    # ── Get Tier 1 (Premium) w3 for execution ──
+    w3 = await rpc_manager.get_optimal_w3(is_critical=True)
+
     try:
         account = w3.eth.account.from_key(PRIVATE_KEY)
         contract = w3.eth.contract(
@@ -917,7 +929,7 @@ async def execute_arbitrage(
             f"🔄 <b>Arb Executed</b>\n"
             f"📊 Pair: <code>{token_symbol}/USDC</code>\n"
             f"🔀 Route: {dex_a} → {dex_b}\n"
-            f"💰 Profit: +${net_profit_usd:.2f}\n"
+            f"💰 Profit: +${gross_profit_usd:.2f}\n"
             f"🔗 <a href='https://arbiscan.io/tx/{tx_hash_hex}'>Arbiscan</a>"
         )
 
@@ -951,7 +963,7 @@ async def get_eth_price(rpc_manager: SmartAsyncRPCManager) -> float:
                 10**18, 500, DEXES["Uniswap_V3"] # Pass the full DEX config
             )
             
-            result = await multicall.functions.tryAggregate(False, [(target, data)]).call()
+            result = await multicall.functions.tryAggregate(False, [(target, data)]).call({'gas': 10_000_000})
             success, ret_bytes = result[0]
             
             if success:
@@ -1027,7 +1039,7 @@ async def scan_and_execute(rpc_manager: SmartAsyncRPCManager, current_block: int
         tasks = []
         for chunk in chunks:
             tasks.append(
-                multicall.functions.tryAggregate(False, chunk).call({'gas': 50_000_000})
+                multicall.functions.tryAggregate(False, chunk).call({'gas': 100000000})
             )
             
         # Execute ALL tasks concurrently - the RPCs can handle this now
@@ -1126,7 +1138,7 @@ async def scan_and_execute(rpc_manager: SmartAsyncRPCManager, current_block: int
         tasks_b = []
         for chunk in chunks_b:
             tasks_b.append(
-                multicall.functions.tryAggregate(False, chunk).call({'gas': 50_000_000})
+                multicall.functions.tryAggregate(False, chunk).call({'gas': 100000000})
             )
             
         # Execute ALL tasks concurrently - the RPCs can handle this now
@@ -1197,6 +1209,14 @@ async def scan_and_execute(rpc_manager: SmartAsyncRPCManager, current_block: int
         )
 
         if net_profit >= MIN_PROFIT_USD:
+            # ── Phantom Arbitrage Filter ──
+            if net_profit > 1000.0:
+                logger.warning(
+                    f"⚠️ Phantom Arbitrage Detected: {symbol}/USDC | Net: ${net_profit:.2f} | "
+                    f"Route: {buy_dex}→{sell_dex}. Skipping to avoid honeypots/low liquidity traps."
+                )
+                continue
+
             logger.info(
                 f"💰 PROFITABLE: {symbol}/USDC | Net: +${net_profit:.2f} | "
                 f"Route: {buy_dex} → {sell_dex}"

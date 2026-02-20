@@ -942,16 +942,25 @@ async def scan_triangular_spreads(rpc_manager: SmartAsyncRPCManager, block_numbe
             gas_cost_wei = 1_000_000 * gas_price # Higher estimate for tri-arb calculation padding
             net_profit = estimate_net_profit_usd(gross_profit_usd, gas_cost_wei, eth_price_usd)
             
-            if net_profit >= MIN_PROFIT_USD and net_profit > max_net_profit:
-                max_net_profit = net_profit
-                best_profitable = {
-                    "r_type": r_type, "sym1": sym1, "sym2": sym2,
-                    "dex1": dex1, "fee1": fee1, 
-                    "dex2": dex2, "fee2": fee2, 
-                    "dex3": dex3, "fee3": fee3,
-                    "out1": leg2_in, "out2": leg3_in, "out3": out_usdc,
-                    "net_profit": net_profit
-                }
+            if net_profit >= MIN_PROFIT_USD:
+                # ── Phantom Arbitrage Filter ──
+                if net_profit > 1000.0:
+                    logger.warning(
+                        f"⚠️ Phantom Arbitrage Detected: {sym1}-{sym2} | Net: ${net_profit:.2f} | "
+                        f"Route: {dex1}→{dex2}→{dex3}. Skipping to avoid honeypots/low liquidity traps."
+                    )
+                    continue
+
+                if net_profit > max_net_profit:
+                    max_net_profit = net_profit
+                    best_profitable = {
+                        "r_type": r_type, "sym1": sym1, "sym2": sym2,
+                        "dex1": dex1, "fee1": fee1, 
+                        "dex2": dex2, "fee2": fee2, 
+                        "dex3": dex3, "fee3": fee3,
+                        "out1": leg2_in, "out2": leg3_in, "out3": out_usdc,
+                        "net_profit": net_profit
+                    }
 
     if best_profitable:
         bp = best_profitable
