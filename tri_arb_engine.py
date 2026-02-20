@@ -432,7 +432,7 @@ MIN_PROFIT_USD = 0.50
 SCAN_COOLDOWN_SECONDS = 2.0       # Strict 2.0s rate-limit delay
 LEG_A_SLIPPAGE_BPS = 50           # 0.5% max slippage allowed for tri-arb routes
 SAFETY_MARGIN_MULTIPLIER = 1.5
-MULTICALL_CHUNK_SIZE = 3
+MULTICALL_CHUNK_SIZE = 2
 
 # Route Failure Handling
 MAX_ROUTE_FAILURES = 3
@@ -652,6 +652,9 @@ async def execute_tri_arbitrage(
         # ── Transaction ──
         nonce = await w3.eth.get_transaction_count(account.address)
         gas_price = await w3.eth.gas_price
+        
+        # ── Dynamic Gas Multiplier ──
+        gas_multiplier = 1.05 if net_profit_usd > MIN_PROFIT_USD else 2.0
 
         tx = await contract.functions.requestFlashLoan(
             w3.to_checksum_address(USDC_ADDRESS),
@@ -661,7 +664,7 @@ async def execute_tri_arbitrage(
             "from": account.address,
             "nonce": nonce,
             "gas": 1_200_000, # More gas due to 3 hops
-            "maxFeePerGas": gas_price * 2,
+            "maxFeePerGas": int(gas_price * gas_multiplier),
             "maxPriorityFeePerGas": w3.to_wei(0.01, "gwei"),
         })
 
@@ -747,13 +750,12 @@ async def perform_multicall(multicall_contract, calls_list: List[Tuple[str, byte
     chunks = [calls_list[i : i + MULTICALL_CHUNK_SIZE] for i in range(0, len(calls_list), MULTICALL_CHUNK_SIZE)]
     tasks = [multicall_contract.functions.tryAggregate(False, chunk).call({'gas': 300_000_000}) for chunk in chunks]
     chunk_results = []
-    for task in tasks:
-        try:
-            res = await task
-            chunk_results.append(res)
-        except Exception as e:
-            chunk_results.append(e)
-        await asyncio.sleep(0.3)  # The Guerilla Delay
+    # We will split the tasks list itself into smaller chunks so we gather a few at a time
+    task_chunks = [tasks[x:x+MULTICALL_CHUNK_SIZE] for x in range(0, len(tasks), MULTICALL_CHUNK_SIZE)]
+    for t_chunk in task_chunks:
+        res = await asyncio.gather(*t_chunk, return_exceptions=True)
+        chunk_results.extend(res)
+        await asyncio.sleep(0.1)  # Fast Batching Delay
     return [item for sublist in chunk_results for item in sublist]
 
 

@@ -466,7 +466,7 @@ SCAN_COOLDOWN_SECONDS = 2.0       # Strict 2.0s rate-limit delay
 MAX_SLIPPAGE_BPS = 50             # 0.5% max slippage for trade sizing
 SAFETY_MARGIN_MULTIPLIER = 1.5    # Extra margin on cost estimates to avoid NotProfitable
 LEG_A_SLIPPAGE_BPS = 50           # 0.5% slippage tolerance on Leg A output
-MULTICALL_CHUNK_SIZE = 3         # Max calls per tryAggregate to avoid gas limits
+MULTICALL_CHUNK_SIZE = 2         # Max calls per tryAggregate to avoid gas limits
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ROUTE CONFIDENCE — Tracks simulation failures per route
@@ -864,6 +864,9 @@ async def execute_arbitrage(
         # ── Build flashloan transaction ──
         nonce = await w3.eth.get_transaction_count(account.address)
         gas_price = await w3.eth.gas_price
+        
+        # ── Dynamic Gas Multiplier ──
+        gas_multiplier = 1.05 if gross_profit_usd > MIN_PROFIT_USD else 2.0
 
         tx = await contract.functions.requestFlashLoan(
             w3.to_checksum_address(USDC_ADDRESS),
@@ -873,7 +876,7 @@ async def execute_arbitrage(
             "from": account.address,
             "nonce": nonce,
             "gas": 800_000,
-            "maxFeePerGas": gas_price * 2,
+            "maxFeePerGas": int(gas_price * gas_multiplier),
             "maxPriorityFeePerGas": w3.to_wei(0.01, "gwei"),
         })
 
@@ -1025,13 +1028,11 @@ async def scan_and_execute(rpc_manager: SmartAsyncRPCManager, current_block: int
             
         # Fire all chunks
         chunk_results = []
-        for task in tasks:
-            try:
-                res = await task
-                chunk_results.append(res)
-            except Exception as e:
-                chunk_results.append(e)
-            await asyncio.sleep(0.3)  # The Guerilla Delay
+        task_chunks = [tasks[x:x+MULTICALL_CHUNK_SIZE] for x in range(0, len(tasks), MULTICALL_CHUNK_SIZE)]
+        for t_chunk in task_chunks:
+            res = await asyncio.gather(*t_chunk, return_exceptions=True)
+            chunk_results.extend(res)
+            await asyncio.sleep(0.1)  # Fast Batching Delay
         
         # Flatten results
         leg_a_results = [item for sublist in chunk_results for item in sublist]
@@ -1125,13 +1126,11 @@ async def scan_and_execute(rpc_manager: SmartAsyncRPCManager, current_block: int
             )
             
         chunk_results_b = []
-        for task in tasks_b:
-            try:
-                res = await task
-                chunk_results_b.append(res)
-            except Exception as e:
-                chunk_results_b.append(e)
-            await asyncio.sleep(0.3)  # The Guerilla Delay
+        task_chunks_b = [tasks_b[x:x+MULTICALL_CHUNK_SIZE] for x in range(0, len(tasks_b), MULTICALL_CHUNK_SIZE)]
+        for t_chunk in task_chunks_b:
+            res = await asyncio.gather(*t_chunk, return_exceptions=True)
+            chunk_results_b.extend(res)
+            await asyncio.sleep(0.1)  # Fast Batching Delay
         
         # Flatten
         leg_b_results = [item for sublist in chunk_results_b for item in sublist]

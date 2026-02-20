@@ -271,7 +271,7 @@ def build_token_map():
     for name, underlying in UNDERLYING_ASSETS.items():
         try:
             underlying_cs = Web3.to_checksum_address(underlying)
-            result = rpc_manager.call(data_provider.functions.getReserveTokensAddresses(underlying_cs).call)
+            result = rpc_manager.call(data_provider.functions.getReserveTokensAddresses(underlying_cs).call, False, {'to': DATA_PROVIDER_ADDRESS})
 
             var_debt_token = result[2]
             # Skip if returned zero address (asset not active on Aave)
@@ -347,7 +347,7 @@ def classify_targets_multicall(all_users_list):
 
         try:
             _, return_data = rpc_manager.call(
-                multicall_contract.functions.aggregate(calls).call, is_critical=False
+                multicall_contract.functions.aggregate(calls).call, False, {'to': MULTICALL3_ADDRESS}
             )
         except Exception as e:
             print(f"  ⚠️ Multicall batch failed (offset {batch_start}): {e}")

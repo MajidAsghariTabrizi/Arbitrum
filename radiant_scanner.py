@@ -253,7 +253,7 @@ def build_token_map():
     for name, underlying in UNDERLYING_ASSETS.items():
         try:
             underlying_cs = Web3.to_checksum_address(underlying)
-            result = rpc_manager.call(data_provider.functions.getReserveTokensAddresses(underlying_cs).call, is_critical=False)
+            result = rpc_manager.call(data_provider.functions.getReserveTokensAddresses(underlying_cs).call, False, {'to': DATA_PROVIDER_ADDRESS})
             var_debt_token = result[2]
             if var_debt_token == "0x0000000000000000000000000000000000000000":
                 print(f"  ⚠️ {name}: Not active on Radiant, skipping.")
@@ -282,7 +282,7 @@ def classify_targets_multicall(all_users_list):
     # 1. Fetch dynamic pool address first
     addresses_provider = w3.eth.contract(address=POOL_ADDRESSES_PROVIDER, abi=ADDRESSES_PROVIDER_ABI)
     try:
-        dynamic_pool_address = rpc_manager.call(addresses_provider.functions.getLendingPool().call, is_critical=False)
+        dynamic_pool_address = rpc_manager.call(addresses_provider.functions.getLendingPool().call, False, {'to': POOL_ADDRESSES_PROVIDER})
     except Exception as e:
         print(f"  ❌ Failed to fetch dynamic Pool Address: {e}")
         return {"tier_1_danger": [], "tier_2_watchlist": []}
@@ -309,7 +309,7 @@ def classify_targets_multicall(all_users_list):
         
         try:
             _, return_data = rpc_manager.call(
-                multicall_contract.functions.aggregate(calls).call, is_critical=False
+                multicall_contract.functions.aggregate(calls).call, False, {'to': MULTICALL3_ADDRESS}
             )
         except Exception as e:
             print(f"  ⚠️ Multicall batch failed: {e}")
