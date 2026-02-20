@@ -218,8 +218,10 @@ TRANSFER_TOPIC = Web3.to_hex(Web3.keccak(text="Transfer(address,address,uint256)
 
 # SETTINGS
 TOTAL_BLOCKS_TO_SCAN = 50000   # Check last ~4 hours
-CHUNK_SIZE = 2000              # 2000 blocks per chunk
-SCAN_INTERVAL = 600            # 10 minutes between scans
+CHUNK_SIZE = 2000              # Aave Configuration
+# We aim to keep scan size manageable for free RPCs
+SCAN_INTERVAL = 3600            # 1 hour between scans
+TOTAL_BLOCKS_TO_SCAN = 10000    # Backwards time travel distance
 MULTICALL_BATCH_SIZE = 150     # Max addresses per Multicall3 batch
 
 # Tier Thresholds
@@ -480,7 +482,7 @@ def scan_debt_tokens():
                                 all_users.add(addr2)
 
                     chunk_start = chunk_end + 1
-                    time.sleep(0.5)
+                    time.sleep(2.0)
 
                 except Exception as e:
                     # Failure: Halve the chunk size dynamically
