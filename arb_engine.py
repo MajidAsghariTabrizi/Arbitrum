@@ -1325,7 +1325,7 @@ async def main():
             break
         except Exception as e:
             if rpc_manager.is_rate_limit_error(e):
-                await rpc_manager.handle_rate_limit()
+                await rpc_manager.handle_rate_limit(w3)
             else:
                 logger.error(f"❌ Loop error: {e}")
                 logger.debug(traceback.format_exc())
