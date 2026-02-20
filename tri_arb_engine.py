@@ -64,7 +64,8 @@ PRIMARY_RPC = os.getenv("PRIMARY_RPC")
 if not PRIMARY_RPC:
     PRIMARY_RPC = os.getenv("RPC_URL", "")
 
-FALLBACK_RPCS = [r.strip() for r in os.getenv("FALLBACK_RPCS", "").split(",") if r.strip()]
+FALLBACK_RPCS_RAW = os.getenv("FALLBACK_RPCS", "").replace('"', '').replace("'", "")
+FALLBACK_RPCS = [r.strip() for r in FALLBACK_RPCS_RAW.split(",") if r.strip()]
 
 PRIVATE_KEY = os.getenv("PRIVATE_KEY", "")
 TRI_ARBITRAGEUR_ADDRESS = os.getenv("TRI_ARBITRAGEUR_ADDRESS", "")
@@ -972,6 +973,8 @@ async def main():
     logger.info("═══════════════════════════════════════════════════════════")
 
     # --- STARTUP PROTECTION ---
+    # Jitter to prevent all PM2 instances from hitting RPC simultaneously on boot
+    await asyncio.sleep(random.uniform(1.0, 10.0))
     while True:
         try:
             w3 = await rpc_manager.get_optimal_w3(is_critical=False)

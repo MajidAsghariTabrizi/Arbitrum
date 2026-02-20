@@ -45,7 +45,8 @@ except ImportError:
 # Configuration Constants
 PRIMARY_WSS = os.getenv("PRIMARY_WSS")
 PRIMARY_RPC = os.getenv("PRIMARY_RPC")
-FALLBACK_RPCS = [r.strip() for r in os.getenv("FALLBACK_RPCS", "").split(",") if r.strip()]
+FALLBACK_RPCS_RAW = os.getenv("FALLBACK_RPCS", "").replace('"', '').replace("'", "")
+FALLBACK_RPCS = [r.strip() for r in FALLBACK_RPCS_RAW.split(",") if r.strip()]
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
 LIQUIDATOR_ADDRESS = os.getenv("LIQUIDATOR_ADDRESS")
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
@@ -776,6 +777,8 @@ class AntiGravityBot:
     async def run_forever(self):
         """Main Smart HTTP Polling Loop — tracks new blocks and processes them."""
         # --- STARTUP PROTECTION ---
+        # Jitter to prevent all PM2 instances from hitting RPC simultaneously on boot
+        await asyncio.sleep(random.uniform(1.0, 10.0))
         while True:
             try:
                 await self.rpc.connect()

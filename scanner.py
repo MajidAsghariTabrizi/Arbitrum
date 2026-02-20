@@ -20,7 +20,7 @@ class SmartSyncRPCManager:
     """
     def __init__(self):
         self.premium_url = os.getenv("PRIMARY_RPC")
-        fallback_rpcs_raw = os.getenv("FALLBACK_RPCS", "").split(",")
+        fallback_rpcs_raw = os.getenv("FALLBACK_RPCS", "").replace('"', '').replace("'", "").split(",")
         self.free_urls = [url.strip() for url in fallback_rpcs_raw if url.strip()]
 
         if not self.premium_url:
