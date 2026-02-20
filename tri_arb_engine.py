@@ -1023,7 +1023,7 @@ async def main():
             if not await sentinel.should_scan():
                 continue
 
-            await asyncio.sleep(random.uniform(2.0, 10.0))
+            await asyncio.sleep(random.uniform(2.0, 8.0))
 
             scan_start = time.time()
 

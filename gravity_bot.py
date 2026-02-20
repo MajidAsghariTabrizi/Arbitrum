@@ -828,7 +828,7 @@ class AntiGravityBot:
                 if not await sentinel.should_scan():
                     continue
 
-                await asyncio.sleep(random.uniform(2.0, 10.0))
+                await asyncio.sleep(random.uniform(2.0, 8.0))
                 
                 # New block(s) detected — process the latest one
                 self.last_processed_block = current_block

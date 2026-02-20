@@ -3,6 +3,7 @@ import json
 import traceback
 import threading
 import requests
+import random
 import time
 from web3 import Web3
 from dotenv import load_dotenv
@@ -89,10 +90,6 @@ class SmartSyncRPCManager:
             if not node["is_blacklisted"]:
                 return self.free_w3s[node["url"]]
                 
-        # Failsafe
-        if not is_critical:
-            raise Exception("NO_FREE_NODES")
-            
         print("⚠️ All Free Nodes blacklisted! Falling back to Premium Node temporarily.")
         return self.premium_w3
 
