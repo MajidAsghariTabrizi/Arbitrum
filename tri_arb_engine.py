@@ -429,7 +429,7 @@ MIN_PROFIT_USD = 1.00
 SCAN_COOLDOWN_SECONDS = 2.0       # Strict 2.0s rate-limit delay
 LEG_A_SLIPPAGE_BPS = 50           # 0.5% max slippage allowed for tri-arb routes
 SAFETY_MARGIN_MULTIPLIER = 1.5
-MULTICALL_CHUNK_SIZE = 5
+MULTICALL_CHUNK_SIZE = 3
 
 # Route Failure Handling
 MAX_ROUTE_FAILURES = 3
@@ -823,6 +823,8 @@ async def scan_triangular_spreads(rpc_manager: SmartAsyncRPCManager, block_numbe
         leg2_results = await perform_multicall(multicall, leg2_calls)
     except Exception as e:
         logger.warning(f"⚠️ Leg 2 Multicall failed: {e}")
+        await rpc_manager.handle_rate_limit(w3)
+        await asyncio.sleep(5)
         return 0
 
     best_leg2_r1 = {}
@@ -889,6 +891,8 @@ async def scan_triangular_spreads(rpc_manager: SmartAsyncRPCManager, block_numbe
         leg3_results = await perform_multicall(multicall, leg3_calls)
     except Exception as e:
         logger.warning(f"⚠️ Leg 3 Multicall failed: {e}")
+        await rpc_manager.handle_rate_limit(w3)
+        await asyncio.sleep(5)
         return 0
 
     best_profitable = None

@@ -18,7 +18,7 @@ fallback_urls = [url.strip().strip("'").strip('"') for url in raw_fallback.split
 RPC_LIST = [PRIMARY_RPC] + fallback_urls
 
 ZMQ_ADDR = "tcp://127.0.0.1:5555"
-POLL_INTERVAL = 0.5  # HTTP Polling on a single script can be rapid.
+POLL_INTERVAL = 1.5  # HTTP Polling on a single script can be rapid.
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | EMITTER | %(message)s')
 logger = logging.getLogger("BlockEmitter")

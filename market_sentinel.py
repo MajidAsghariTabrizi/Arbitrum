@@ -11,7 +11,7 @@ class MarketSentinel:
     volatility occurs or a heartbeat expires. This prevents RPC spam on
     quiet blocks, saving expensive node request quotas.
     """
-    def __init__(self, symbol="ETHUSDT", threshold_pct=0.05, heartbeat_sec=60):
+    def __init__(self, symbol="ETHUSDT", threshold_pct=0.08, heartbeat_sec=60):
         self.symbol = symbol
         self.threshold_pct = threshold_pct
         self.heartbeat_sec = heartbeat_sec

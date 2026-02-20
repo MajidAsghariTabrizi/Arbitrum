@@ -463,7 +463,7 @@ SCAN_COOLDOWN_SECONDS = 2.0       # Strict 2.0s rate-limit delay
 MAX_SLIPPAGE_BPS = 50             # 0.5% max slippage for trade sizing
 SAFETY_MARGIN_MULTIPLIER = 1.5    # Extra margin on cost estimates to avoid NotProfitable
 LEG_A_SLIPPAGE_BPS = 50           # 0.5% slippage tolerance on Leg A output
-MULTICALL_CHUNK_SIZE = 15         # Max calls per tryAggregate to avoid gas limits
+MULTICALL_CHUNK_SIZE = 3         # Max calls per tryAggregate to avoid gas limits
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ROUTE CONFIDENCE — Tracks simulation failures per route
@@ -1029,6 +1029,7 @@ async def scan_and_execute(rpc_manager: SmartAsyncRPCManager, current_block: int
     except Exception as e:
         logger.error(f"❌ Leg A Multicall failed: {e}")
         await rpc_manager.handle_rate_limit(w3)
+        await asyncio.sleep(5)
         return 0
 
     # Decode Leg A results
