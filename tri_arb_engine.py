@@ -432,7 +432,7 @@ MIN_PROFIT_USD = 0.50
 SCAN_COOLDOWN_SECONDS = 2.0       # Strict 2.0s rate-limit delay
 LEG_A_SLIPPAGE_BPS = 50           # 0.5% max slippage allowed for tri-arb routes
 SAFETY_MARGIN_MULTIPLIER = 1.5
-MULTICALL_CHUNK_SIZE = 2
+MULTICALL_CHUNK_SIZE = 3
 
 # Route Failure Handling
 MAX_ROUTE_FAILURES = 3
@@ -755,7 +755,7 @@ async def perform_multicall(multicall_contract, calls_list: List[Tuple[str, byte
     for t_chunk in task_chunks:
         res = await asyncio.gather(*t_chunk, return_exceptions=True)
         chunk_results.extend(res)
-        await asyncio.sleep(0.1)  # Fast Batching Delay
+        await asyncio.sleep(0.15)  # Tiny delay to bypass free-tier firewalls
     return [item for sublist in chunk_results for item in sublist]
 
 

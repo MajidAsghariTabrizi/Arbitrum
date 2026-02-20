@@ -36,7 +36,7 @@ class MarketSentinel:
             if os.path.exists(cache_file):
                 with open(cache_file, "r") as f:
                     ts, cached_price = f.read().split(",")
-                    if current_time - float(ts) < 2.0:
+                    if current_time - float(ts) < 5.0:
                         return float(cached_price)
         except Exception:
             pass

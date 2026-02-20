@@ -466,7 +466,7 @@ SCAN_COOLDOWN_SECONDS = 2.0       # Strict 2.0s rate-limit delay
 MAX_SLIPPAGE_BPS = 50             # 0.5% max slippage for trade sizing
 SAFETY_MARGIN_MULTIPLIER = 1.5    # Extra margin on cost estimates to avoid NotProfitable
 LEG_A_SLIPPAGE_BPS = 50           # 0.5% slippage tolerance on Leg A output
-MULTICALL_CHUNK_SIZE = 2         # Max calls per tryAggregate to avoid gas limits
+MULTICALL_CHUNK_SIZE = 3         # Max calls per tryAggregate to avoid gas limits
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ROUTE CONFIDENCE — Tracks simulation failures per route
@@ -1032,7 +1032,7 @@ async def scan_and_execute(rpc_manager: SmartAsyncRPCManager, current_block: int
         for t_chunk in task_chunks:
             res = await asyncio.gather(*t_chunk, return_exceptions=True)
             chunk_results.extend(res)
-            await asyncio.sleep(0.1)  # Fast Batching Delay
+            await asyncio.sleep(0.15)  # Tiny delay to bypass free-tier firewalls
         
         # Flatten results
         leg_a_results = [item for sublist in chunk_results for item in sublist]
@@ -1130,7 +1130,7 @@ async def scan_and_execute(rpc_manager: SmartAsyncRPCManager, current_block: int
         for t_chunk in task_chunks_b:
             res = await asyncio.gather(*t_chunk, return_exceptions=True)
             chunk_results_b.extend(res)
-            await asyncio.sleep(0.1)  # Fast Batching Delay
+            await asyncio.sleep(0.15)  # Tiny delay to bypass free-tier firewalls
         
         # Flatten
         leg_b_results = [item for sublist in chunk_results_b for item in sublist]

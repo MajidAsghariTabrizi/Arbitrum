@@ -221,7 +221,7 @@ UNDERLYING_ASSETS = {
 TRANSFER_TOPIC = Web3.to_hex(Web3.keccak(text="Transfer(address,address,uint256)"))
 
 TOTAL_BLOCKS_TO_SCAN = 10000 # Polling Config
-CHUNK_SIZE = 50
+CHUNK_SIZE = 200
 SCAN_INTERVAL = 43200
 MULTICALL_BATCH_SIZE = 150
 TIER_1_MAX_HF = 1.050
@@ -373,7 +373,7 @@ def scan_debt_tokens():
             print(f"\n🔍 Scanning {name} [{address}]...")
             
             chunk_start = start_block
-            current_chunk_size = 50  # Fixed small chunk size
+            current_chunk_size = 200  # Fixed chunk size matching CHUNK_SIZE
 
             while chunk_start < current_block:
                 chunk_end = min(chunk_start + current_chunk_size - 1, current_block)
@@ -388,11 +388,11 @@ def scan_debt_tokens():
                         'address': Web3.to_checksum_address(address),
                         'topics': [TRANSFER_TOPIC]
                     })
-                    
-                    time.sleep(20.0)  # Extreme throttling per chunk
 
-                    # Success: keep size fixed at 50
-                    current_chunk_size = 50
+                    time.sleep(1.5)  # Force 1.5s delay between EVERY get_logs to prevent 429
+
+                    # Success: keep size fixed
+                    current_chunk_size = 200
                     
                     for log in logs:
                         if len(log['topics']) >= 3:
