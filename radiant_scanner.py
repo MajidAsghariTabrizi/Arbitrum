@@ -48,7 +48,7 @@ class StickySyncRPCManager:
     def handle_rate_limit(self, url_failed: str):
         """429: Sleep with exponential backoff, retry on SAME node. No rotation."""
         self.strike_count += 1
-        cooldown = min(120, 2 ** self.strike_count) + random.uniform(0.1, 1.0)
+        cooldown = min(120, 2.0 * self.strike_count) + random.uniform(0.1, 1.0)
         print(f"⏳ Rate limited (Strike {self.strike_count}). Sleeping {cooldown:.1f}s on SAME node...")
         time.sleep(cooldown)
 

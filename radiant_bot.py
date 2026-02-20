@@ -214,7 +214,8 @@ class AsyncRPCManager:
     async def handle_rate_limit(self):
         """429: Sleep with exponential backoff, retry on SAME node."""
         self.strike_count += 1
-        cooldown = min(30, (2 ** self.strike_count)) + random.uniform(0.1, 1.0)
+        # Soft exponential backoff for minor RPS breaches
+        cooldown = min(30, 2.0 * self.strike_count) + random.uniform(0.1, 1.0)
         logger.warning(f"⏳ Rate limited (Strike {self.strike_count}). Sleeping {cooldown:.2f}s on SAME node...")
         await asyncio.sleep(cooldown)
 
@@ -471,11 +472,16 @@ class RadiantBot:
         max_collateral_value = Decimal(0)
         debt_amount_raw = 0
 
-        tasks = [
-            self.data_provider.functions.getUserReserveData(asset, user).call()
-            for asset in self.reserves_list
-        ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Soft-Start Initialization
+        results = []
+        for asset in self.reserves_list:
+            try:
+                task = self.data_provider.functions.getUserReserveData(asset, user).call()
+                res = await task
+                results.append(res)
+            except Exception as e:
+                results.append(e)
+            await asyncio.sleep(0.1) # Throttle to stay under QuickNode RPS limit
 
         for i, res in enumerate(results):
             if isinstance(res, Exception):

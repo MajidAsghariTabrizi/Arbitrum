@@ -215,7 +215,7 @@ class StickyAsyncRPCManager:
         Never rotates to avoid polluting other QoS lanes.
         """
         self.strike_count += 1
-        cooldown = min(30, (2 ** self.strike_count)) + random.uniform(0.1, 1.0)
+        cooldown = min(30, 2.0 * self.strike_count) + random.uniform(0.1, 1.0)
         logger.warning(f"⏳ Rate limited (Strike {self.strike_count}). Sleeping {cooldown:.2f}s on SAME node...")
         await asyncio.sleep(cooldown)
 

@@ -76,15 +76,17 @@ class MarketSentinel:
         if current_time - self.last_scan_time >= self.heartbeat_sec:
             return True
             
+        # Prevent consecutive failed fetches from spamming Binance
+        if current_time - self.last_fail_time < 10:
+            return False
+
         # Fetch the latest price
         self.current_price = await self.fetch_price()
 
         # 2. Connection Failure (Failsafe to scan)
         if self.current_price == 0.0:
-            if current_time - self.last_fail_time >= 10:
-                self.last_fail_time = current_time
-                return True
-            return False
+            self.last_fail_time = current_time
+            return True
 
         # 3. First execution
         if self.last_price == 0.0:
