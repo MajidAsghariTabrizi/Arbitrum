@@ -1153,30 +1153,42 @@ async def main():
     logger.info(f"💰 Min Profit: ${MIN_PROFIT_USD}")
     logger.info("═══════════════════════════════════════════════════════════")
 
-    w3 = await rpc_manager.get_w3()
-    chain_id = await w3.eth.chain_id
-    logger.info(f"✅ Connected to chain {chain_id}")
+    # --- STARTUP PROTECTION ---
+    while True:
+        try:
+            w3 = await rpc_manager.get_w3()
+            chain_id = await w3.eth.chain_id
+            logger.info(f"✅ Connected to chain {chain_id}")
 
-    if chain_id != 42161:
-        logger.warning(f"⚠️  Expected Arbitrum One (42161), got chain {chain_id}")
+            if chain_id != 42161:
+                logger.warning(f"⚠️  Expected Arbitrum One (42161), got chain {chain_id}")
 
-    # Initialize DB
-    db_manager.init_db()
-    logger.info("✅ Database initialized")
+            # Initialize DB
+            db_manager.init_db()
+            logger.info("✅ Database initialized")
 
-    # Telegram startup notification
-    send_telegram_alert(
-        f"🔄 <b>DEX Arb Engine Started (Multicall3)</b>\n"
-        f"📊 {len(TOKENS)} tokens × {len(DEXES)} DEXs\n"
-        f"🔗 RPC: <code>{rpc_manager.endpoints[0][:40]}...</code>"
-    )
+            # Telegram startup notification
+            send_telegram_alert(
+                f"🔄 <b>DEX Arb Engine Started (Multicall3)</b>\n"
+                f"📊 {len(TOKENS)} tokens × {len(DEXES)} DEXs\n"
+                f"🔗 RPC: <code>{rpc_manager.endpoints[0][:40]}...</code>"
+            )
 
-    last_block = 0
-    # Use dummy semaphore for initial price fetch (Multicall inside get_eth_price doesn't use it, but valid for sig)
-    eth_price_usd = await get_eth_price(rpc_manager)
-    eth_price_refresh = time.time()
-    
-    logger.info(f"📈 ETH Price: ${eth_price_usd:,.0f}")
+            last_block = 0
+            # Use dummy semaphore for initial price fetch
+            eth_price_usd = await get_eth_price(rpc_manager)
+            eth_price_refresh = time.time()
+            
+            logger.info(f"📈 ETH Price: ${eth_price_usd:,.0f}")
+            break # Success, exit startup loop
+
+        except Exception as e:
+            if rpc_manager.is_rate_limit_error(e):
+                logger.warning("🐌 Rate limit on STARTUP. Yielding to backoff...")
+                await rpc_manager.handle_rate_limit()
+            else:
+                logger.error(f"💥 Fatal Startup Error: {e}")
+                await asyncio.sleep(5)
 
     # ── Scanning Loop (ZMQ SUB) ──
     sentinel = MarketSentinel()

@@ -786,16 +786,28 @@ class RadiantBot:
 
     async def run_forever(self):
         """Main Smart HTTP Polling Loop — tracks new blocks and processes them."""
-        await self.rpc.connect()
-        await self.init_contracts()
+        # --- STARTUP PROTECTION ---
+        while True:
+            try:
+                await self.rpc.connect()
+                await self.init_contracts()
 
-        await self.send_telegram_alert("🟢 <b>Radiant Bot Started (HTTP Polling)</b>")
-        logger.info("🚀 Radiant Bot Engine started. Sniper + Scout architecture active.")
+                await self.send_telegram_alert("🟢 <b>Radiant Bot Started (HTTP Polling)</b>")
+                logger.info("🚀 Radiant Bot Engine started. Sniper + Scout architecture active.")
 
-        self.last_processed_block = await self.w3.eth.block_number
-        logger.info(f"📍 Starting from block: {self.last_processed_block}")
+                self.last_processed_block = await self.w3.eth.block_number
+                logger.info(f"📍 Starting from block: {self.last_processed_block}")
 
-        await self.load_targets_async()
+                await self.load_targets_async()
+                break # Success, exit startup loop
+
+            except Exception as e:
+                if self.rpc.is_rate_limit_error(e):
+                    logger.warning("🐌 Rate limit on STARTUP. Yielding to backoff...")
+                    await self.rpc.handle_rate_limit()
+                else:
+                    logger.error(f"💥 Fatal Startup Error: {e}")
+                    await asyncio.sleep(5)
         logger.info(f"📊 Initial targets: Tier 1: {len(self.tier_1_danger)} | Tier 2: {len(self.tier_2_watchlist)}")
 
         sentinel = MarketSentinel()
