@@ -832,6 +832,7 @@ class AntiGravityBot:
                 logger.info("🚀 Anti-Gravity Engine started. Sniper + Scout architecture active.")
 
                 # Seed the block tracker
+                await asyncio.sleep(random.uniform(0.5, 2.0))
                 self.last_processed_block = await self.w3.eth.block_number
                 logger.info(f"📍 Starting from block: {self.last_processed_block}")
 

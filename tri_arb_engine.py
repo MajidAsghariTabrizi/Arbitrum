@@ -998,6 +998,7 @@ async def main():
             )
 
             last_block = 0
+            await asyncio.sleep(random.uniform(0.5, 2.0))
             eth_price_usd = await get_eth_price(rpc_manager)
             eth_price_refresh = time.time()
             logger.info(f"📈 ETH Price: ${eth_price_usd:,.0f}")
