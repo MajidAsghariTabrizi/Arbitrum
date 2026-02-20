@@ -411,7 +411,7 @@ route_blacklist: Dict[str, float] = {}  # "TOKEN/dex_a/dex_b" -> blacklist times
 # ═══════════════════════════════════════════════════════════════════════════════
 
 async def get_v3_quote_robust(
-    rpc_manager: StickyAsyncRPCManager,
+    rpc_manager: SmartAsyncRPCManager,
     semaphore: asyncio.Semaphore,
     quoter_address: str,
     token_in: str,
@@ -453,7 +453,7 @@ async def get_v3_quote_robust(
 
 
 async def get_algebra_quote_robust(
-    rpc_manager: StickyAsyncRPCManager,
+    rpc_manager: SmartAsyncRPCManager,
     semaphore: asyncio.Semaphore,
     quoter_address: str,
     token_in: str,
@@ -695,7 +695,7 @@ def build_curve_swap_calldata(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 async def execute_arbitrage(
-    rpc_manager: StickyAsyncRPCManager,
+    rpc_manager: SmartAsyncRPCManager,
     route_details: dict,
     gross_profit_usd: float,
     eth_price_usd: float,
@@ -874,7 +874,7 @@ async def execute_arbitrage(
 # MAIN SCANNING LOOP
 # ═══════════════════════════════════════════════════════════════════════════════
 
-async def get_eth_price(rpc_manager: StickyAsyncRPCManager) -> float:
+async def get_eth_price(rpc_manager: SmartAsyncRPCManager) -> float:
     """Fetch ETH price efficiently using Multicall3 on a Free Tier Node."""
     while True:
         try:
@@ -906,7 +906,7 @@ async def get_eth_price(rpc_manager: StickyAsyncRPCManager) -> float:
         return 2500.0  # Fallback estimate
 
 
-async def scan_and_execute(rpc_manager: StickyAsyncRPCManager, current_block: int, eth_price_usd: float, sentinel: MarketSentinel = None):
+async def scan_and_execute(rpc_manager: SmartAsyncRPCManager, current_block: int, eth_price_usd: float, sentinel: MarketSentinel = None):
     """
     2-Step Multicall3 Scan Loop (0 Rate Limits).
     

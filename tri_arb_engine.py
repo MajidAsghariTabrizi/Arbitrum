@@ -656,7 +656,7 @@ async def execute_tri_arbitrage(
 # MAIN SCANNING LOOP
 # ═══════════════════════════════════════════════════════════════════════════════
 
-async def get_eth_price(rpc_manager: StickyAsyncRPCManager) -> float:
+async def get_eth_price(rpc_manager: SmartAsyncRPCManager) -> float:
     """Get ETH price in USD via Multicall on Free node."""
     while True:
         try:
@@ -702,7 +702,7 @@ async def perform_multicall(multicall_contract, calls_list: List[Tuple[str, byte
     return flat
 
 
-async def scan_triangular_spreads(rpc_manager: StickyAsyncRPCManager, block_number: int, eth_price_usd: float):
+async def scan_triangular_spreads(rpc_manager: SmartAsyncRPCManager, block_number: int, eth_price_usd: float):
     now = time.time()
     w3 = await rpc_manager.get_w3()
     multicall = w3.eth.contract(address=w3.to_checksum_address(MULTICALL3_ADDRESS), abi=MULTICALL3_ABI)
