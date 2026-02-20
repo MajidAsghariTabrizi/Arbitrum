@@ -23,7 +23,6 @@ import json
 import logging
 import time
 import traceback
-import websockets
 from decimal import Decimal
 from itertools import permutations
 from typing import Dict, List, Optional, Tuple
@@ -184,12 +183,7 @@ class AsyncRPCManager:
 
         url = self.endpoints[self.current_index]
         logger.info(f"🔌 Connecting to RPC: {url[:40]}...")
-        
-        if url.startswith("wss://"):
-            self.w3 = AsyncWeb3(AsyncWeb3.WebSocketProvider(url))
-            await self.w3.provider.connect()
-        else:
-            self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(url))
+        self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(url))
             
         try:
             connected = await self.w3.is_connected()
@@ -216,40 +210,6 @@ class AsyncRPCManager:
         """Check if an error is a rate limit / forbidden error."""
         err_str = str(error).lower()
         return any(k in err_str for k in ["429", "403", "rate", "forbidden", "quota", "too many requests", "-32001"])
-
-    async def block_stream(self):
-        """Yields new block numbers using WSS subscriptions or HTTP polling fallback."""
-        url = self.endpoints[self.current_index]
-        
-        if url.startswith("wss://"):
-            logger.info(f"🎧 Starting WSS Block Stream on {url[:40]}...")
-            async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
-                sub_msg = {"jsonrpc": "2.0", "id": 1, "method": "eth_subscribe", "params": ["newHeads"]}
-                await ws.send(json.dumps(sub_msg))
-                response = await ws.recv()
-                logger.info(f"✅ WSS Subscribed: {response}")
-                
-                while True:
-                    msg = await ws.recv()
-                    data = json.loads(msg)
-                    if "method" in data and data["method"] == "eth_subscription":
-                        block_hex = data["params"]["result"]["number"]
-                        block_number = int(block_hex, 16)
-                        yield block_number
-        else:
-            logger.info(f"📡 Starting HTTP Block Polling on {url[:40]}...")
-            last_block = 0
-            if self.w3:
-                last_block = await self.w3.eth.block_number
-                yield last_block
-
-            while True:
-                current_block = await self.w3.eth.block_number
-                if current_block > last_block:
-                    last_block = current_block
-                    yield current_block
-                else:
-                    await asyncio.sleep(SCAN_COOLDOWN_SECONDS)
 
     async def get_w3(self) -> AsyncWeb3:
         if self.w3 is None:
@@ -394,7 +354,7 @@ TRI_ARB_ABI = [{
 # ═══════════════════════════════════════════════════════════════════════════════
 AAVE_FLASHLOAN_FEE_BPS = 5
 MIN_PROFIT_USD = 1.00
-SCAN_COOLDOWN_SECONDS = 0.5
+SCAN_COOLDOWN_SECONDS = 2.0       # Strict 2.0s rate-limit delay
 LEG_A_SLIPPAGE_BPS = 50           # 0.5% max slippage allowed for tri-arb routes
 SAFETY_MARGIN_MULTIPLIER = 1.5
 MULTICALL_CHUNK_SIZE = 5
@@ -947,26 +907,33 @@ async def main():
 
     while True:
         try:
-            async for current_block in rpc_manager.block_stream():
-                scan_start = time.time()
-                
-                if time.time() - eth_price_refresh > 300:
-                    eth_price_usd = await get_eth_price(rpc_manager)
-                    eth_price_refresh = time.time()
-                    logger.info(f"📈 ETH Price refreshed: ${eth_price_usd:,.0f}")
+            current_block = await w3.eth.block_number
+            
+            if current_block <= last_block:
+                await asyncio.sleep(SCAN_COOLDOWN_SECONDS)
+                continue
 
-                spreads = await scan_triangular_spreads(rpc_manager, current_block, eth_price_usd)
+            scan_start = time.time()
+            
+            if time.time() - eth_price_refresh > 300:
+                eth_price_usd = await get_eth_price(rpc_manager)
+                eth_price_refresh = time.time()
+                logger.info(f"📈 ETH Price refreshed: ${eth_price_usd:,.0f}")
 
-                scan_duration = time.time() - scan_start
-                blocks_jumped = current_block - last_block if last_block > 0 else 1
-                last_block = current_block
+            spreads = await scan_triangular_spreads(rpc_manager, current_block, eth_price_usd)
 
-                logger.info(
-                    f"🧱 Block {current_block} | "
-                    f"Spreads: {spreads} | "
-                    f"{scan_duration*1000:.0f}ms | "
-                    f"Δ{blocks_jumped} blocks"
-                )
+            scan_duration = time.time() - scan_start
+            blocks_jumped = current_block - last_block if last_block > 0 else 1
+            last_block = current_block
+
+            logger.info(
+                f"🧱 Block {current_block} | "
+                f"Spreads: {spreads} | "
+                f"{scan_duration*1000:.0f}ms | "
+                f"Δ{blocks_jumped} blocks"
+            )
+
+            await asyncio.sleep(SCAN_COOLDOWN_SECONDS)
 
         except KeyboardInterrupt:
             logger.info("⏹️  Shutting down gracefully...")
