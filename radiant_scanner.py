@@ -341,6 +341,7 @@ def classify_targets_multicall(all_users_list):
     return {"tier_1_danger": tier_1, "tier_2_watchlist": tier_2}
 
 def scan_debt_tokens():
+    global RPC_WAS_DOWN
     # 1. Proactive Health Check (Auto-Recovery)
     # rpc_manager.check_primary_health()
     w3 = rpc_manager.premium_w3  # Get current active instance
