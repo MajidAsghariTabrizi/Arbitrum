@@ -44,7 +44,7 @@ except ImportError:
 
 # Configuration Constants
 PRIMARY_WSS = os.getenv("PRIMARY_WSS")
-PRIMARY_RPC = os.getenv("PRIMARY_RPC")
+PRIMARY_RPC = "https://arbitrum-one-rpc.publicnode.com"
 FALLBACK_RPCS_RAW = os.getenv("FALLBACK_RPCS", "").replace('"', '').replace("'", "")
 FALLBACK_RPCS = [r.strip() for r in FALLBACK_RPCS_RAW.split(",") if r.strip()]
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
@@ -492,7 +492,7 @@ class RadiantBot:
         debt_asset, collateral_asset, debt_amount, debt_val = await self.analyze_user_assets(user)
 
         # Heuristic minimum value check (ignoring unit difference for now, keeping logic same)
-        if not debt_asset or not collateral_asset or debt_val < 50:
+        if not debt_asset or not collateral_asset or debt_val < 1:
             return
 
         logger.info(f"⚔️ SNIPING: {user} | Debt Value: {debt_val:.2f}")

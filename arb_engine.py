@@ -60,9 +60,7 @@ load_dotenv()
 
 # RPC — unified convention: PRIMARY_WSS and PRIMARY_RPC
 PRIMARY_WSS = os.getenv("PRIMARY_WSS")
-PRIMARY_RPC = os.getenv("PRIMARY_RPC")
-if not PRIMARY_RPC:
-    PRIMARY_RPC = os.getenv("RPC_URL", "")
+PRIMARY_RPC = "https://1rpc.io/arb"
 
 FALLBACK_RPCS_RAW = os.getenv("FALLBACK_RPCS", "").replace('"', '').replace("'", "")
 FALLBACK_RPCS = [r.strip() for r in FALLBACK_RPCS_RAW.split(",") if r.strip()]
@@ -140,21 +138,26 @@ MULTICALL3_ABI = [
 # TOKEN CONFIGURATION — Arbitrum Mainnet (Real Addresses)
 # ═══════════════════════════════════════════════════════════════════════════════
 TOKENS: Dict[str, dict] = {
-    "USDC":   {"address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", "decimals": 6},
-    "USDT":   {"address": "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9", "decimals": 6},
-    "DAI":    {"address": "0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1", "decimals": 18},
-    "WETH":   {"address": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1", "decimals": 18},
-    "ARB":    {"address": "0x912CE59144191C1204E64559FE8253a0e49E6548", "decimals": 18},
+    # ── Long-Tail Assets (Prioritized for slower nodes) ──
     "MAGIC":  {"address": "0x539bdE0d7Dbd33f84E8aaf9084C942D9800Ef002", "decimals": 18},
-    "GRAIL":  {"address": "0x3d9907F9a368ad0a51Be60f7Da3b97cf940982D8", "decimals": 18},
     "PENDLE": {"address": "0x0c880f6761F1af8d9Aa9C466984785263cf79560", "decimals": 18},
+    "GNS":    {"address": "0x18c11FD286C5EC11c3b683Caa813B77f5163A122", "decimals": 18},
+    "JOE":    {"address": "0x371c7ec6D8039ff7933a2AA28EB827Ffe1F52f07", "decimals": 18},
+    "VRTX":   {"address": "0x95146881b86B3ee99e63705eC87AfE29Fcc0Baa4", "decimals": 18},
+    "GRAIL":  {"address": "0x3d9907F9a368ad0a51Be60f7Da3b97cf940982D8", "decimals": 18},
+    
+    # ── Mid-Cap / Others ──
     "GMX":    {"address": "0xfc5A1A6EB076a2C7AD06EDb220f4daaC9AF172af", "decimals": 18},
     "RDNT":   {"address": "0x3082CC23568eA640225c2467653dB90e9250AaA0", "decimals": 18},
     "AIDOGE": {"address": "0x09E18590E8f76b6Cf471b3cd75fE1A1a9D2B2c2b", "decimals": 18},
     "XAI":    {"address": "0x4cb9a7ae498cedcbb5eae9f25736ae7d428c9d66", "decimals": 18},
-    "JOE":    {"address": "0x371c7ec6D8039ff7933a2AA28EB827Ffe1F52f07", "decimals": 18},
-    "GNS":    {"address": "0x18c11FD286C5EC11c3b683Caa813B77f5163A122", "decimals": 18},
-    "VRTX":   {"address": "0x95146881b86B3ee99e63705eC87AfE29Fcc0Baa4", "decimals": 18},
+    
+    # ── Majors ──
+    "WETH":   {"address": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1", "decimals": 18},
+    "ARB":    {"address": "0x912CE59144191C1204E64559FE8253a0e49E6548", "decimals": 18},
+    "USDC":   {"address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", "decimals": 6},
+    "USDT":   {"address": "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9", "decimals": 6},
+    "DAI":    {"address": "0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1", "decimals": 18},
 }
 
 # Base quote token
@@ -457,7 +460,7 @@ ARB_CONTRACT_ABI = [
 # CONSTANTS
 # ═══════════════════════════════════════════════════════════════════════════════
 AAVE_FLASHLOAN_FEE_BPS = 5        # 0.05% = 5 basis points
-MIN_PROFIT_USD = 1.00              # $1 minimum — accounts for gas spikes + slippage drift
+MIN_PROFIT_USD = 0.50              # $0.50 minimum — guerilla volume strategy
 MAX_GAS_PRICE_GWEI = 1.0          # Arbitrum gas is cheap, but cap it
 SCAN_COOLDOWN_SECONDS = 2.0       # Strict 2.0s rate-limit delay
 MAX_SLIPPAGE_BPS = 50             # 0.5% max slippage for trade sizing

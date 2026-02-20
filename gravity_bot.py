@@ -44,7 +44,7 @@ except ImportError:
 
 # Configuration Constants
 PRIMARY_WSS = os.getenv("PRIMARY_WSS")
-PRIMARY_RPC = os.getenv("PRIMARY_RPC")
+PRIMARY_RPC = "https://rpc.ankr.com/arbitrum"
 FALLBACK_RPCS_RAW = os.getenv("FALLBACK_RPCS", "").replace('"', '').replace("'", "")
 FALLBACK_RPCS = [r.strip() for r in FALLBACK_RPCS_RAW.split(",") if r.strip()]
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
@@ -454,7 +454,7 @@ class AntiGravityBot:
         """Builds, simulates, signs, and sends Flash Loan liquidation transaction."""
         debt_asset, collateral_asset, debt_amount, debt_val = await self.analyze_user_assets(user)
 
-        if not debt_asset or not collateral_asset or debt_val < 50:
+        if not debt_asset or not collateral_asset or debt_val < 1:
             return
 
         logger.info(f"⚔️ SNIPING: {user} | Debt: ${debt_val:.2f}")
