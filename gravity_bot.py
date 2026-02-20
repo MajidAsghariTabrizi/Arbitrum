@@ -60,7 +60,7 @@ if not PRIVATE_KEY or not LIQUIDATOR_ADDRESS:
     exit(1)
 
 # Polling Config
-POLL_INTERVAL = 1.0          # 1.0s — relaxed polling
+POLL_INTERVAL = 2.0          # 2.0s — relaxed polling
 SCOUT_INTERVAL = 10          # Scout (Tier 2) runs every N blocks
 
 # Tier Thresholds (must match scanner.py)
@@ -214,7 +214,7 @@ class AsyncRPCManager:
             logger.warning(f"🔄 3 strikes! Switching to RPC [{self.current_index + 1}/{len(self.endpoints)}]")
             await self.connect()
         else:
-            cooldown = min(16, (2 ** self.strike_count)) + random.uniform(0.1, 1.0)
+            cooldown = min(30, (2 ** self.strike_count)) + random.uniform(0.1, 1.0)
             logger.warning(f"⏳ Rate limited (Strike {self.strike_count}/3). Cooling down {cooldown:.2f}s...")
             await asyncio.sleep(cooldown)
 
@@ -825,7 +825,7 @@ class AntiGravityBot:
                 if not await sentinel.should_scan():
                     continue
 
-                await asyncio.sleep(random.uniform(0.5, 4.0))
+                await asyncio.sleep(random.uniform(1.0, 7.0))
                 
                 # New block(s) detected — process the latest one
                 self.last_processed_block = current_block

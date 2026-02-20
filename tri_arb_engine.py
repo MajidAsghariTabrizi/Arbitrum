@@ -265,7 +265,7 @@ class SmartAsyncRPCManager:
         
         if url_failed == self.premium_url:
             self.strike_counts["premium"] = self.strike_counts.get("premium", 0) + 1
-            cooldown = min(16, (2 ** self.strike_counts["premium"])) + random.uniform(0.1, 1.0)
+            cooldown = min(30, (2 ** self.strike_counts["premium"])) + random.uniform(0.1, 1.0)
             logger.warning(f"💎 PREMIUM Rate limited (Strike {self.strike_counts['premium']}). Cooling down {cooldown:.2f}s...")
             await asyncio.sleep(cooldown)
         else:
@@ -1020,7 +1020,7 @@ async def main():
             if not await sentinel.should_scan():
                 continue
 
-            await asyncio.sleep(random.uniform(0.5, 4.0))
+            await asyncio.sleep(random.uniform(1.0, 7.0))
 
             scan_start = time.time()
 
