@@ -2,6 +2,8 @@ import aiohttp
 import asyncio
 import time
 import logging
+import subprocess
+import os
 
 logger = logging.getLogger("MarketSentinel")
 
@@ -11,6 +13,8 @@ class MarketSentinel:
     volatility occurs or a heartbeat expires. This prevents RPC spam on
     quiet blocks, saving expensive node request quotas.
     """
+    STATE_FILE = ".system_state"
+
     def __init__(self, symbol="ETHUSDT", threshold_pct=0.08, heartbeat_sec=60):
         self.symbol = symbol
         self.threshold_pct = threshold_pct
@@ -20,10 +24,11 @@ class MarketSentinel:
         self.current_price = 0.0
         self.last_fail_time = 0
         
-        # Smart RPC Router State
+        # Orchestrator State
         self.is_high_volatility = False
         self.volatility_timestamp = 0
-        self.volatility_cooldown_sec = 60
+        self.volatility_cooldown_sec = 1200  # 20 minutes until PEACE
+        self.current_system_state = "PEACE"  # Track to avoid redundant writes
 
     async def fetch_price(self) -> float:
         """Fetches the current price of the asset from Binance API, using a cross-process cache."""
@@ -91,15 +96,53 @@ class MarketSentinel:
             logger.info(f"🚨 Volatility Spike! {self.symbol} moved {price_diff_pct:.3f}% (Price: ${self.current_price:.2f})")
             self.is_high_volatility = True
             self.volatility_timestamp = current_time
+            self._set_system_state("WAR")
             return True
 
-        # Check Volatility Cooldown
+        # Check Volatility Cooldown → transition to PEACE after 20 min
         if self.is_high_volatility:
             if current_time - self.volatility_timestamp >= self.volatility_cooldown_sec:
                 self.is_high_volatility = False
-                logger.info("📉 Market relaxed. Volatility premium mode deactivated.")
+                self._set_system_state("PEACE")
+                logger.info("📉 Market relaxed. System state → PEACE.")
 
         return False
+
+    def _set_system_state(self, state: str):
+        """Write WAR/PEACE to .system_state and control scanner PM2 processes."""
+        if state == self.current_system_state:
+            return  # No-op if already in this state
+
+        self.current_system_state = state
+
+        # Write state file
+        try:
+            with open(self.STATE_FILE, "w") as f:
+                f.write(state)
+            logger.info(f"📝 .system_state → {state}")
+        except Exception as e:
+            logger.error(f"❌ Failed to write .system_state: {e}")
+
+        # PM2 process orchestration
+        if state == "WAR":
+            # Stop background scanners to free up RPC bandwidth
+            try:
+                subprocess.run(["pm2", "stop", "temp-scanner", "temp-radiant-scanner"],
+                               capture_output=True, timeout=10)
+                logger.info("⚔️ WAR MODE: Stopped background scanners (pm2 stop)")
+            except Exception as e:
+                logger.warning(f"⚠️ PM2 stop failed (scanners may not be running): {e}")
+
+        elif state == "PEACE":
+            # Restart background scanners
+            try:
+                subprocess.run(["pm2", "start", "scanner.py", "--interpreter", "python3",
+                               "--name", "temp-scanner"], capture_output=True, timeout=10)
+                subprocess.run(["pm2", "start", "radiant_scanner.py", "--interpreter", "python3",
+                               "--name", "temp-radiant-scanner"], capture_output=True, timeout=10)
+                logger.info("🕊️ PEACE MODE: Restarted background scanners (pm2 start)")
+            except Exception as e:
+                logger.warning(f"⚠️ PM2 start failed: {e}")
 
     def update_last_price(self):
         """

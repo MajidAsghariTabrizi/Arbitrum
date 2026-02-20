@@ -58,13 +58,11 @@ logger = logging.getLogger("ArbEngine")
 # ═══════════════════════════════════════════════════════════════════════════════
 load_dotenv()
 
-# RPC — unified convention: PRIMARY_WSS and PRIMARY_RPC
-PRIMARY_WSS = os.getenv("PRIMARY_WSS")
-PRIMARY_RPC = "https://1rpc.io/arb"
+# RPC — Strict QoS Lane: Tier 1 (Arb Engines) → PRIMARY_RPC
+PRIMARY_RPC = os.getenv("PRIMARY_RPC")
 
 FALLBACK_RPCS_RAW = os.getenv("FALLBACK_RPCS", "").replace('"', '').replace("'", "")
 FALLBACK_RPCS = [r.strip() for r in FALLBACK_RPCS_RAW.split(",") if r.strip()]
-# ALL_RPCS = [PRIMARY_RPC] + FALLBACK_RPCS  <-- managed by AsyncRPCManager now
 
 PRIVATE_KEY = os.getenv("PRIVATE_KEY", "")
 DEX_ARBITRAGEUR_ADDRESS = os.getenv("DEX_ARBITRAGEUR_ADDRESS", "")
@@ -168,131 +166,103 @@ USDC_DECIMALS = 6
 FLASHLOAN_USDC_AMOUNT = 1000 * 10**USDC_DECIMALS  # $1,000
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ASYNC RPC MANAGER
+# STICKY ASYNC RPC MANAGER (QoS Lane: PRIMARY_RPC)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# SMART ASYNC RPC MANAGER
-# ═══════════════════════════════════════════════════════════════════════════════
+class StickyAsyncRPCManager:
+    """
+    Strict QoS Sticky RPC Manager:
+    - Uses a SINGLE dedicated RPC node (PRIMARY_RPC) for all requests.
+    - On 429 Rate Limit: asyncio.sleep() + retry on the SAME node (no rotation).
+    - On hard connection error (ServerDisconnected, ConnectionError): failover to FALLBACK_RPCS.
+    - Once primary recovers, switch back.
+    """
+    HARD_ERROR_KEYWORDS = ["serverdisconnected", "connectionerror", "connection refused",
+                           "cannot connect", "server disconnected", "connectionreseterror",
+                           "clientconnectorerror", "oserror", "gaierror"]
 
-class SmartAsyncRPCManager:
-    """
-    Tiered RPC Router:
-    - Tier 1 (Premium): PRIMARY_RPC (QuickNode, etc.) - Used for execution & high volatility.
-    - Tier 2 (Free): FALLBACK_RPCS - Used for polling and routine tasks.
-    Ranks Tier 2 nodes every 60s based on latency.
-    """
     def __init__(self):
-        self.premium_url = PRIMARY_RPC
-        self.free_urls = FALLBACK_RPCS.copy()
-        
-        # Connection Pools
-        self.premium_w3 = None
-        self.free_w3s: Dict[str, AsyncWeb3] = {}
-        
-        # Tier 2 Rankings: [{"url": str, "latency": float, "is_blacklisted": bool, "blacklist_until": float}]
-        self.free_nodes_rank = [{"url": url, "latency": 999.0, "is_blacklisted": False, "blacklist_until": 0} for url in self.free_urls]
-        self.strike_counts: Dict[str, int] = {url: 0 for url in self.free_urls}
-        
-    async def connect_all(self):
-        """Initializes Web3 instances for all nodes."""
-        logger.info(f"🔌 Connecting to Premium RPC (Tier 1): {self.premium_url[:40]}...")
-        self.premium_w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(
-            self.premium_url, request_kwargs={"timeout": 60}
+        self.primary_url = PRIMARY_RPC
+        self.fallback_urls = FALLBACK_RPCS.copy()
+        self.w3: Optional[AsyncWeb3] = None
+        self.active_url = self.primary_url
+        self.on_fallback = False
+        self.strike_count = 0
+
+    async def connect(self):
+        """Connect to the dedicated RPC node."""
+        self.active_url = self.primary_url
+        self.on_fallback = False
+        self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(
+            self.primary_url, request_kwargs={"timeout": 60}
         ))
-        
-        for url in self.free_urls:
-            self.free_w3s[url] = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(
-                url, request_kwargs={"timeout": 60}
-            ))
-            
-        # Start background ranker
-        asyncio.create_task(self._rank_nodes_loop())
-        logger.info(f"🟢 Smart RPC Manager Initialized ({len(self.free_urls)} Free Nodes).")
+        logger.info(f"🔌 Sticky RPC (Tier 1): {self.primary_url[:50]}...")
 
-    async def _rank_nodes_loop(self):
-        """Background task that pings Tier 2 nodes every 60s."""
-        while True:
-            await self.rank_free_nodes()
-            await asyncio.sleep(60)
+    async def get_w3(self) -> AsyncWeb3:
+        """Returns the current sticky Web3 instance."""
+        return self.w3
 
-    async def rank_free_nodes(self):
-        """Pings all free nodes and updates their latency."""
-        now = time.time()
-        
-        for node in self.free_nodes_rank:
-            # Un-blacklist if time has passed
-            if node["is_blacklisted"] and now > node["blacklist_until"]:
-                node["is_blacklisted"] = False
-                node["latency"] = 999.0 # Reset
-                self.strike_counts[node["url"]] = 0
-                logger.info(f"🟢 Node un-blacklisted: {node['url'][:40]}...")
+    async def handle_rate_limit(self):
+        """
+        429 Rate Limit: Sleep with exponential backoff, retry on the SAME node.
+        Never rotates to avoid polluting other QoS lanes.
+        """
+        self.strike_count += 1
+        cooldown = min(30, (2 ** self.strike_count)) + random.uniform(0.1, 1.0)
+        logger.warning(f"⏳ Rate limited (Strike {self.strike_count}). Sleeping {cooldown:.2f}s on SAME node...")
+        await asyncio.sleep(cooldown)
 
-            if node["is_blacklisted"]:
+    async def handle_hard_error(self, error):
+        """
+        Hard connection error: Failover to FALLBACK_RPCS sequentially.
+        Periodically tries to reconnect to primary.
+        """
+        logger.error(f"💥 Hard RPC error: {error}. Failing over to FALLBACK_RPCS...")
+        self.strike_count = 0  # Reset rate-limit strikes on hard error
+
+        for fb_url in self.fallback_urls:
+            try:
+                fb_w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(
+                    fb_url, request_kwargs={"timeout": 60}
+                ))
+                await asyncio.wait_for(fb_w3.eth.block_number, timeout=5.0)
+                self.w3 = fb_w3
+                self.active_url = fb_url
+                self.on_fallback = True
+                logger.warning(f"🔄 Fallback active: {fb_url[:50]}...")
+                return
+            except Exception:
                 continue
 
-            # Ping test
-            w3 = self.free_w3s[node["url"]]
-            start = time.time()
-            try:
-                # 3-second strict timeout for ping
-                await asyncio.wait_for(w3.eth.block_number, timeout=3.0)
-                node["latency"] = time.time() - start
-            except Exception:
-                # Penalty for failing ping, but not immediate blacklisting
-                node["latency"] = 999.0
-        
-        # Sort by latency (lowest first, blacklisted at the bottom)
-        self.free_nodes_rank.sort(key=lambda x: (x["is_blacklisted"], x["latency"]))
+        # All fallbacks failed — sleep and retry primary
+        logger.error("❌ All FALLBACK_RPCS failed. Sleeping 10s then retrying primary...")
+        await asyncio.sleep(10)
+        await self.connect()
 
-    async def get_optimal_w3(self, is_critical=False, sentinel: MarketSentinel = None) -> AsyncWeb3:
-        """
-        Routes the request.
-        is_critical=True OR sentinel.is_high_volatility == True -> Premium Node
-        is_critical=False -> Best available Free Node
-        """
-        if is_critical or (sentinel and sentinel.is_high_volatility):
-            return self.premium_w3
-
-        # Find best free node
-        for node in self.free_nodes_rank:
-            if not node["is_blacklisted"]:
-                return self.free_w3s[node["url"]]
-                
-        # Failsafe: if ALL free nodes are blacklisted, fallback to premium temporarily
-        logger.warning("⚠️ All Free Nodes blacklisted! Falling back to Premium Node temporarily.")
-        return self.premium_w3
-
-    async def handle_rate_limit(self, w3_instance: AsyncWeb3):
-        """
-        If a Free node hits 429, blacklist it for 5 minutes.
-        If the Premium node hits 429, apply exponential backoff.
-        """
-        url_failed = w3_instance.provider.endpoint_uri
-        
-        if url_failed == self.premium_url:
-            self.strike_counts["premium"] = self.strike_counts.get("premium", 0) + 1
-            cooldown = min(30, (2 ** self.strike_counts["premium"])) + random.uniform(0.1, 1.0)
-            logger.warning(f"💎 PREMIUM Rate limited (Strike {self.strike_counts['premium']}). Cooling down {cooldown:.2f}s...")
-            await asyncio.sleep(cooldown)
-        else:
-            for node in self.free_nodes_rank:
-                if node["url"] == url_failed:
-                    self.strike_counts[url_failed] += 1
-                    if self.strike_counts[url_failed] >= 3:
-                        node["is_blacklisted"] = True
-                        node["blacklist_until"] = time.time() + 300 # 5 minutes
-                        logger.warning(f"🚫 Free Node Blacklisted (5m): {url_failed[:40]}...")
-                    else:
-                        logger.warning(f"🐌 Free Node Strike {self.strike_counts[url_failed]}/3: {url_failed[:40]}...")
-                    break
-            
-            # Re-sort to push blacklisted down
-            self.free_nodes_rank.sort(key=lambda x: (x["is_blacklisted"], x["latency"]))
+    async def try_recover_primary(self):
+        """If on fallback, periodically try to switch back to primary."""
+        if not self.on_fallback:
+            return
+        try:
+            primary_w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(
+                self.primary_url, request_kwargs={"timeout": 60}
+            ))
+            await asyncio.wait_for(primary_w3.eth.block_number, timeout=5.0)
+            self.w3 = primary_w3
+            self.active_url = self.primary_url
+            self.on_fallback = False
+            self.strike_count = 0
+            logger.info(f"🟢 Primary RPC recovered: {self.primary_url[:50]}...")
+        except Exception:
+            pass  # Stay on fallback
 
     def is_rate_limit_error(self, error):
         err_str = str(error).lower()
-        return any(k in err_str for k in ["429", "403", "rate", "forbidden", "quota", "too many requests", "-32001", "timeout"])
+        return any(k in err_str for k in ["429", "403", "rate", "forbidden", "quota", "too many requests", "-32001"])
+
+    def is_hard_error(self, error):
+        err_str = str(error).lower()
+        return any(k in err_str for k in self.HARD_ERROR_KEYWORDS)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # DEX CONFIGURATION — Arbitrum Mainnet (Real Addresses)
@@ -770,7 +740,7 @@ def build_curve_swap_calldata(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 async def execute_arbitrage(
-    rpc_manager: SmartAsyncRPCManager,
+    rpc_manager: StickyAsyncRPCManager,
     route_details: dict,
     gross_profit_usd: float,
     eth_price_usd: float,
@@ -800,7 +770,7 @@ async def execute_arbitrage(
     leg_b_usdc_out = route_details["leg_b_usdc_out"]
 
     # ── Get Tier 1 (Premium) w3 for execution ──
-    w3 = await rpc_manager.get_optimal_w3(is_critical=True)
+    w3 = await rpc_manager.get_w3()
 
     try:
         account = w3.eth.account.from_key(PRIVATE_KEY)
@@ -949,11 +919,11 @@ async def execute_arbitrage(
 # MAIN SCANNING LOOP
 # ═══════════════════════════════════════════════════════════════════════════════
 
-async def get_eth_price(rpc_manager: SmartAsyncRPCManager) -> float:
+async def get_eth_price(rpc_manager: StickyAsyncRPCManager) -> float:
     """Fetch ETH price efficiently using Multicall3 on a Free Tier Node."""
     while True:
         try:
-            w3 = await rpc_manager.get_optimal_w3(is_critical=False)
+            w3 = await rpc_manager.get_w3()
             multicall = w3.eth.contract(address=MULTICALL3_ADDRESS, abi=MULTICALL3_ABI)
         
             # Quote 1 WETH → USDC on UniV3 0.05%
@@ -973,7 +943,7 @@ async def get_eth_price(rpc_manager: SmartAsyncRPCManager) -> float:
         except Exception as e:
             if rpc_manager.is_rate_limit_error(e):
                 logger.warning("🐌 Rate limit on ETH price fetch. Yielding to backoff...")
-                await rpc_manager.handle_rate_limit(w3)
+                await rpc_manager.handle_rate_limit()
             else:
                 logger.error(f"⚠️ Error fetching ETH price: {e}")
                 logger.debug(traceback.format_exc())
@@ -981,7 +951,7 @@ async def get_eth_price(rpc_manager: SmartAsyncRPCManager) -> float:
         return 2500.0  # Fallback estimate
 
 
-async def scan_and_execute(rpc_manager: SmartAsyncRPCManager, current_block: int, eth_price_usd: float, sentinel: MarketSentinel = None):
+async def scan_and_execute(rpc_manager: StickyAsyncRPCManager, current_block: int, eth_price_usd: float, sentinel: MarketSentinel = None):
     """
     2-Step Multicall3 Scan Loop (0 Rate Limits).
     
@@ -995,7 +965,7 @@ async def scan_and_execute(rpc_manager: SmartAsyncRPCManager, current_block: int
     # asyncio.create_task(check_contract_allowance(rpc_manager))
     spreads_found = 0
     now = time.time()
-    w3 = await rpc_manager.get_optimal_w3(is_critical=True)
+    w3 = await rpc_manager.get_w3()
     multicall = w3.eth.contract(address=w3.to_checksum_address(MULTICALL3_ADDRESS), abi=MULTICALL3_ABI)
     
     # ════════════════════════════════════════════════════════════════════════════
@@ -1259,12 +1229,9 @@ async def main():
     logger.info("🛸 ANTI-GRAVITY — DEX Arbitrage Engine v2.1")
     logger.info("═══════════════════════════════════════════════════════════")
     
-    # Initialize RPC Manager
-    rpc_manager = SmartAsyncRPCManager()
-    await rpc_manager.connect_all()
-    
-    # Start background task for RPC ranking
-    asyncio.create_task(rpc_manager._rank_nodes_loop())
+    # Initialize Sticky RPC Manager (QoS: PRIMARY_RPC only)
+    rpc_manager = StickyAsyncRPCManager()
+    await rpc_manager.connect()
 
     logger.info(f"📊 Scanning {len(TOKENS)} tokens across {len(DEXES)} DEXs")
     logger.info(f"🎯 Tokens: {', '.join(TOKENS.keys())}")
@@ -1277,7 +1244,7 @@ async def main():
     await asyncio.sleep(random.uniform(1.0, 10.0))
     while True:
         try:
-            w3 = await rpc_manager.get_optimal_w3(is_critical=False)
+            w3 = await rpc_manager.get_w3()
             chain_id = await w3.eth.chain_id
             logger.info(f"✅ Connected to chain {chain_id}")
 
@@ -1292,7 +1259,7 @@ async def main():
             send_telegram_alert(
                 f"🔄 <b>DEX Arb Engine Started (Multicall3)</b>\n"
                 f"📊 {len(TOKENS)} tokens × {len(DEXES)} DEXs\n"
-                f"🔗 RPC: <code>{rpc_manager.premium_url[:40]}...</code>"
+                f"🔗 RPC: <code>{rpc_manager.primary_url[:40]}...</code>"
             )
 
             last_block = 0
@@ -1306,7 +1273,7 @@ async def main():
         except Exception as e:
             if rpc_manager.is_rate_limit_error(e):
                 logger.warning("🐌 Rate limit on STARTUP. Yielding to backoff...")
-                await rpc_manager.handle_rate_limit(w3)
+                await rpc_manager.handle_rate_limit()
             else:
                 logger.error(f"💥 Fatal Startup Error: {e}")
                 await asyncio.sleep(60)
@@ -1367,7 +1334,7 @@ async def main():
             break
         except Exception as e:
             if rpc_manager.is_rate_limit_error(e):
-                await rpc_manager.handle_rate_limit(w3)
+                await rpc_manager.handle_rate_limit()
             else:
                 logger.error(f"❌ Loop error: {e}")
                 logger.debug(traceback.format_exc())

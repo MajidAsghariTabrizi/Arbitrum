@@ -42,9 +42,8 @@ except ImportError:
     DB_ENABLED = False
     logger.warning("⚠️ db_manager.py not found. Dashboard logging disabled.")
 
-# Configuration Constants
-PRIMARY_WSS = os.getenv("PRIMARY_WSS")
-PRIMARY_RPC = "https://rpc.ankr.com/arbitrum"
+# Configuration Constants — Strict QoS Lane: Tier 2 (Snipers) → SNIPER_RPC
+SNIPER_RPC = os.getenv("SNIPER_RPC")
 FALLBACK_RPCS_RAW = os.getenv("FALLBACK_RPCS", "").replace('"', '').replace("'", "")
 FALLBACK_RPCS = [r.strip() for r in FALLBACK_RPCS_RAW.split(",") if r.strip()]
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
@@ -53,8 +52,8 @@ DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-if not PRIMARY_RPC:
-    logger.error("❌ Critical Error: Missing PRIMARY_RPC in .env")
+if not SNIPER_RPC:
+    logger.error("❌ Critical Error: Missing SNIPER_RPC in .env")
     exit(1)
 if not PRIVATE_KEY or not LIQUIDATOR_ADDRESS:
     logger.error("❌ Critical Error: Missing PRIVATE_KEY or LIQUIDATOR_ADDRESS in .env")
@@ -165,64 +164,84 @@ ERC20_ABI = [{
 # --- 2. ASYNC RPC MANAGER (Enhanced: 403 support) ---
 
 class AsyncRPCManager:
-    """Manages RPC endpoints with automatic failover for 429 AND 403 errors."""
+    """
+    Strict QoS Sticky RPC Manager (Tier 2: SNIPER_RPC).
+    - Uses a SINGLE dedicated RPC node for all requests.
+    - On 429: sleep + retry on SAME node (no rotation).
+    - On hard connection error: failover to FALLBACK_RPCS.
+    """
+    HARD_ERROR_KEYWORDS = ["serverdisconnected", "connectionerror", "connection refused",
+                           "cannot connect", "server disconnected", "connectionreseterror",
+                           "clientconnectorerror", "oserror", "gaierror"]
+
     def __init__(self):
-        self.endpoints = []
-        if PRIMARY_WSS:
-            self.endpoints.append(PRIMARY_WSS)
-        if PRIMARY_RPC:
-            self.endpoints.append(PRIMARY_RPC)
-        self.endpoints.extend(FALLBACK_RPCS)
-        self.current_index = 0
-        self.strike_count = 0
-        self.last_rate_limit = 0
+        self.primary_url = SNIPER_RPC
+        self.fallback_urls = FALLBACK_RPCS.copy()
         self.w3 = None
+        self.active_url = self.primary_url
+        self.on_fallback = False
+        self.strike_count = 0
 
     async def connect(self):
-        """Connect to the current RPC endpoint. Closes any existing session first."""
-        # Gracefully close the previous aiohttp session to prevent
-        # "Unclosed client session" warnings and memory leaks
+        """Connect to the dedicated SNIPER_RPC node."""
+        # Gracefully close the previous aiohttp session
         if self.w3 and hasattr(self.w3.provider, '_request_kwargs'):
             try:
                 session = await self.w3.provider.cache_async_session(None)
                 if session and not session.closed:
                     await session.close()
-                    logger.info("🔒 Previous aiohttp session closed cleanly.")
             except Exception:
-                pass  # Best-effort cleanup — don't block reconnection
+                pass
 
-        url = self.endpoints[self.current_index]
-        logger.info(f"🔌 Connecting to RPC: {url[:40]}...")
-        self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(url))
-            
-        try:
-            connected = await self.w3.is_connected()
-            if not connected:
-                logger.warning(f"⚠️ RPC {url[:40]} might be down, but continuing...")
-        except Exception as e:
-            logger.warning(f"⚠️ Connection test failed (likely rate limit), bypassing: {e}")
-            
-        logger.info(f"🟢 Connected to RPC [{self.current_index + 1}/{len(self.endpoints)}]")
+        self.active_url = self.primary_url
+        self.on_fallback = False
+        self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(
+            self.primary_url, request_kwargs={'timeout': 60}
+        ))
+        logger.info(f"🔌 Sticky RPC (Tier 2 Sniper): {self.primary_url[:50]}...")
 
     async def handle_rate_limit(self):
-        """Handle 429/403 errors with adaptive backoff and failover."""
+        """
+        429 Rate Limit: Sleep with exponential backoff, retry on the SAME node.
+        Never rotates to avoid polluting other QoS lanes.
+        """
         self.strike_count += 1
-        self.last_rate_limit = time.time()
+        cooldown = min(30, (2 ** self.strike_count)) + random.uniform(0.1, 1.0)
+        logger.warning(f"⏳ Rate limited (Strike {self.strike_count}). Sleeping {cooldown:.2f}s on SAME node...")
+        await asyncio.sleep(cooldown)
 
-        if self.strike_count >= 3:
-            self.strike_count = 0
-            self.current_index = (self.current_index + 1) % len(self.endpoints)
-            logger.warning(f"🔄 3 strikes! Switching to RPC [{self.current_index + 1}/{len(self.endpoints)}]")
-            await self.connect()
-        else:
-            cooldown = min(30, (2 ** self.strike_count)) + random.uniform(0.1, 1.0)
-            logger.warning(f"⏳ Rate limited (Strike {self.strike_count}/3). Cooling down {cooldown:.2f}s...")
-            await asyncio.sleep(cooldown)
+    async def handle_hard_error(self, error):
+        """Hard connection error: Failover to FALLBACK_RPCS sequentially."""
+        logger.error(f"💥 Hard RPC error: {error}. Failing over to FALLBACK_RPCS...")
+        self.strike_count = 0
+
+        for fb_url in self.fallback_urls:
+            try:
+                fb_w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(
+                    fb_url, request_kwargs={'timeout': 60}
+                ))
+                connected = await fb_w3.is_connected()
+                if connected:
+                    self.w3 = fb_w3
+                    self.active_url = fb_url
+                    self.on_fallback = True
+                    logger.warning(f"🔄 Fallback active: {fb_url[:50]}...")
+                    return
+            except Exception:
+                continue
+
+        logger.error("❌ All FALLBACK_RPCS failed. Sleeping 10s then retrying primary...")
+        await asyncio.sleep(10)
+        await self.connect()
 
     def is_rate_limit_error(self, error):
         """Check if an error is a rate limit / forbidden error."""
         err_str = str(error).lower()
         return any(k in err_str for k in ["429", "403", "rate", "forbidden", "quota", "too many requests", "-32001"])
+
+    def is_hard_error(self, error):
+        err_str = str(error).lower()
+        return any(k in err_str for k in self.HARD_ERROR_KEYWORDS)
 
 
 # --- 3. ANTI-GRAVITY BOT CLASS ---

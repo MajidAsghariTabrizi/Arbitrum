@@ -12,153 +12,101 @@ from eth_abi import decode
 # Load Env
 load_dotenv()
 
-# --- RPC MANAGER ---
-class SmartSyncRPCManager:
+# --- RPC MANAGER (Strict QoS Lane: Tier 3 → SCANNER_RPC) ---
+class StickySyncRPCManager:
     """
-    Tiered Sync RPC Router:
-    - Tier 1 (Premium): PRIMARY_RPC (QuickNode, etc.)
-    - Tier 2 (Free): FALLBACK_RPCS
+    Strict QoS Sticky Sync RPC Manager:
+    - Uses a SINGLE dedicated RPC node (SCANNER_RPC) for all requests.
+    - On 429 Rate Limit: time.sleep() + retry on SAME node (no rotation).
+    - On hard connection error: failover to FALLBACK_RPCS sequentially.
     """
-    def __init__(self):
-        self.premium_url = os.getenv("PRIMARY_RPC")
-        fallback_rpcs_raw = os.getenv("FALLBACK_RPCS", "").replace('"', '').replace("'", "").split(",")
-        self.free_urls = [url.strip() for url in fallback_rpcs_raw if url.strip()]
+    HARD_ERROR_KEYWORDS = ["serverdisconnected", "connectionerror", "connection refused",
+                           "cannot connect", "server disconnected", "connectionreseterror",
+                           "oserror", "gaierror", "remotedisconnected"]
 
-        if not self.premium_url:
-            print("❌ PRIMARY_RPC not found in .env")
+    def __init__(self):
+        self.primary_url = os.getenv("SCANNER_RPC")
+        fallback_rpcs_raw = os.getenv("FALLBACK_RPCS", "").replace('"', '').replace("'", "").split(",")
+        self.fallback_urls = [url.strip() for url in fallback_rpcs_raw if url.strip()]
+
+        if not self.primary_url:
+            print("❌ SCANNER_RPC not found in .env")
             exit()
 
-        # Connection Pools
-        self.premium_w3 = Web3(Web3.HTTPProvider(self.premium_url, request_kwargs={'timeout': 60}))
-        self.free_w3s = {url: Web3(Web3.HTTPProvider(url, request_kwargs={'timeout': 60})) for url in self.free_urls}
-        
-        # Tier 2 Rankings: [{"url": str, "latency": float, "is_blacklisted": bool, "blacklist_until": float}]
-        self.free_nodes_rank = [{"url": url, "latency": 999.0, "is_blacklisted": False, "blacklist_until": 0} for url in self.free_urls]
-        self.strike_counts = {url: 0 for url in self.free_urls}
-        self.strike_counts["premium"] = 0
+        # Single sticky connection
+        self.premium_w3 = Web3(Web3.HTTPProvider(self.primary_url, request_kwargs={'timeout': 60}))
+        self.active_url = self.primary_url
+        self.on_fallback = False
+        self.strike_count = 0
 
-        # Start background ranker thread
-        self.ranker_thread = threading.Thread(target=self._rank_nodes_loop, daemon=True)
-        self.ranker_thread.start()
-        print(f"🟢 Smart Sync RPC Manager Initialized ({len(self.free_urls)} Free Nodes).")
-
-    def _rank_nodes_loop(self):
-        """Background thread that pings Tier 2 nodes every 60s."""
-        while True:
-            self.rank_free_nodes()
-            time.sleep(60)
-
-    def rank_free_nodes(self):
-        """Pings all free nodes and updates their latency."""
-        now = time.time()
-        for node in self.free_nodes_rank:
-            # Un-blacklist if time has passed
-            if node["is_blacklisted"] and now > node["blacklist_until"]:
-                node["is_blacklisted"] = False
-                node["latency"] = 999.0 # Reset
-                self.strike_counts[node["url"]] = 0
-                print(f"🟢 Node un-blacklisted: {node['url'][:40]}...")
-
-            if node["is_blacklisted"]:
-                continue
-
-            # Ping test with strict 3s timeout
-            url = node["url"]
-            start_time = time.time()
-            try:
-                # We create a temporary w3 with a short timeout just for pinging
-                temp_w3 = Web3(Web3.HTTPProvider(url, request_kwargs={'timeout': 3}))
-                temp_w3.eth.block_number
-                node["latency"] = time.time() - start_time
-            except Exception:
-                node["latency"] = 999.0
-        
-        # Sort by latency
-        self.free_nodes_rank.sort(key=lambda x: (x["is_blacklisted"], x["latency"]))
+        print(f"🟢 Sticky Sync RPC Manager (Tier 3 Scanner): {self.primary_url[:50]}...")
 
     def get_optimal_w3(self, is_critical=False) -> Web3:
-        """
-        Routes the request.
-        is_critical=True -> Premium Node
-        is_critical=False -> Best available Free Node
-        """
-        if is_critical:
-            return self.premium_w3
-
-        # Find best free node
-        for node in self.free_nodes_rank:
-            if not node["is_blacklisted"]:
-                return self.free_w3s[node["url"]]
-                
-        print("⚠️ All Free Nodes blacklisted! Falling back to Premium Node temporarily.")
+        """Returns the single sticky Web3 instance."""
         return self.premium_w3
 
     def handle_rate_limit(self, url_failed: str):
-        """Handles backoffs and blacklists per node."""
-        if url_failed == self.premium_url:
-            self.strike_counts["premium"] = self.strike_counts.get("premium", 0) + 1
-            cooldown = min(120, 2 ** self.strike_counts["premium"])
-            print(f"💎 PREMIUM Rate limited (Strike {self.strike_counts['premium']}). Cooling down {cooldown}s...")
-            time.sleep(cooldown)
-        else:
-            for node in self.free_nodes_rank:
-                if node["url"] == url_failed:
-                    self.strike_counts[url_failed] += 1
-                    if self.strike_counts[url_failed] >= 3:
-                        node["is_blacklisted"] = True
-                        node["blacklist_until"] = time.time() + 300 # 5 minutes
-                        print(f"🚫 Free Node Blacklisted (5m): {url_failed[:40]}...")
-                    else:
-                        print(f"🐌 Free Node Strike {self.strike_counts[url_failed]}/3: {url_failed[:40]}...")
-                    break
-            
-            # Re-sort to push blacklisted down
-            self.free_nodes_rank.sort(key=lambda x: (x["is_blacklisted"], x["latency"]))
+        """429: Sleep with exponential backoff, retry on SAME node. No rotation."""
+        self.strike_count += 1
+        cooldown = min(120, 2 ** self.strike_count) + random.uniform(0.1, 1.0)
+        print(f"⏳ Rate limited (Strike {self.strike_count}). Sleeping {cooldown:.1f}s on SAME node...")
+        time.sleep(cooldown)
+
+    def handle_hard_error(self, error):
+        """Hard connection error: Failover to FALLBACK_RPCS sequentially."""
+        print(f"💥 Hard RPC error: {error}. Failing over to FALLBACK_RPCS...")
+        self.strike_count = 0
+
+        for fb_url in self.fallback_urls:
+            try:
+                fb_w3 = Web3(Web3.HTTPProvider(fb_url, request_kwargs={'timeout': 60}))
+                fb_w3.eth.block_number  # Test connection
+                self.premium_w3 = fb_w3
+                self.active_url = fb_url
+                self.on_fallback = True
+                print(f"🔄 Fallback active: {fb_url[:50]}...")
+                return
+            except Exception:
+                continue
+
+        print("❌ All FALLBACK_RPCS failed. Sleeping 10s then retrying primary...")
+        time.sleep(10)
+        self.premium_w3 = Web3(Web3.HTTPProvider(self.primary_url, request_kwargs={'timeout': 60}))
+        self.active_url = self.primary_url
+        self.on_fallback = False
+
+    def is_rate_limit_error(self, error_str):
+        return any(k in error_str for k in ["429", "403", "too many requests", "forbidden", "timeout"])
+
+    def is_hard_error(self, error_str):
+        return any(k in error_str for k in self.HARD_ERROR_KEYWORDS)
 
     def call(self, func, is_critical=False, *args, **kwargs):
-        """Wrapper for Web3 calls with Smart Routing & Rate Limiting."""
+        """Wrapper for Web3 calls with Sticky Routing & Rate Limiting."""
         try:
             w3_instance = self.get_optimal_w3(is_critical)
-            
-            # We need to extract the actual function from the correctly routed w3 instance
-            # Extract func name, e.g., 'get_logs' from bounds method
             func_name = func.__name__
-            
-            # It's safer to re-bind the function to the optimal w3 instance
             if hasattr(w3_instance.eth, func_name):
                 optimal_func = getattr(w3_instance.eth, func_name)
             else:
-                 optimal_func = func # Fallback if not an eth method
-
+                optimal_func = func
             return optimal_func(*args, **kwargs)
-
         except Exception as e:
             error_str = str(e).lower()
-            
-            if "no_free_nodes" in error_str:
-                print("⏳ No Free Nodes available. Sleeping for 60s before retry...")
-                time.sleep(60)
-                return self.call(func, is_critical, *args, **kwargs)
-                
-            w3_instance = self.get_optimal_w3(is_critical)
-            url_failed = w3_instance.provider.endpoint_uri
 
-            if "429" in error_str or "403" in error_str or "too many requests" in error_str or "forbidden" in error_str or "timeout" in error_str:
-                self.handle_rate_limit(url_failed)
-                time.sleep(2.0 + random.uniform(0.1, 1.0)) # Jittered wait before jumping to next node
-                # Retry recursively with the next best node
+            if self.is_rate_limit_error(error_str):
+                self.handle_rate_limit(self.active_url)
+                time.sleep(2.0 + random.uniform(0.1, 1.0))
+                return self.call(func, is_critical, *args, **kwargs)
+            elif self.is_hard_error(error_str):
+                self.handle_hard_error(e)
                 return self.call(func, is_critical, *args, **kwargs)
             else:
-                self.strike_counts[url_failed] += 1
-                if self.strike_counts[url_failed] >= 3:
-                     self.handle_rate_limit(url_failed)
-                     time.sleep(2.0 + random.uniform(0.1, 1.0)) # Jittered wait before jumping to next node
-                     return self.call(func, is_critical, *args, **kwargs)
                 raise e
 
 
-rpc_manager = SmartSyncRPCManager()
-# w3 globally needed for utility formatting in scanner
+rpc_manager = StickySyncRPCManager()
+# w3 globally needed for utility formatting
 w3 = rpc_manager.premium_w3
 
 # --- CONFIGURATION (RADIANT SPECIFIC) ---
