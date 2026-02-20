@@ -198,10 +198,14 @@ class SmartAsyncRPCManager:
     async def connect_all(self):
         """Initializes Web3 instances for all nodes."""
         logger.info(f"🔌 Connecting to Premium RPC (Tier 1): {self.premium_url[:40]}...")
-        self.premium_w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(self.premium_url))
+        self.premium_w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(
+            self.premium_url, request_kwargs={"timeout": 60}
+        ))
         
         for url in self.free_urls:
-            self.free_w3s[url] = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(url))
+            self.free_w3s[url] = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(
+                url, request_kwargs={"timeout": 60}
+            ))
             
         # Start background ranker
         asyncio.create_task(self._rank_nodes_loop())
@@ -432,7 +436,7 @@ MIN_PROFIT_USD = 0.50
 SCAN_COOLDOWN_SECONDS = 2.0       # Strict 2.0s rate-limit delay
 LEG_A_SLIPPAGE_BPS = 50           # 0.5% max slippage allowed for tri-arb routes
 SAFETY_MARGIN_MULTIPLIER = 1.5
-MULTICALL_CHUNK_SIZE = 3
+MULTICALL_CHUNK_SIZE = 15        # Larger chunks = fewer HTTP requests = faster scans
 
 # Route Failure Handling
 MAX_ROUTE_FAILURES = 3
@@ -750,7 +754,13 @@ async def perform_multicall(multicall_contract, calls_list: List[Tuple[str, byte
     chunks = [calls_list[i : i + MULTICALL_CHUNK_SIZE] for i in range(0, len(calls_list), MULTICALL_CHUNK_SIZE)]
     tasks = [multicall_contract.functions.tryAggregate(False, chunk).call({'gas': 300_000_000}) for chunk in chunks]
     chunk_results = await asyncio.gather(*tasks, return_exceptions=True)
-    return [item for sublist in chunk_results for item in sublist]
+    flat = []
+    for sublist in chunk_results:
+        if isinstance(sublist, Exception):
+            logger.warning(f"⚠️ Multicall chunk failed: {sublist}")
+            continue
+        flat.extend(sublist)
+    return flat
 
 
 async def scan_triangular_spreads(rpc_manager: SmartAsyncRPCManager, block_number: int, eth_price_usd: float):

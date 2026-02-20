@@ -197,10 +197,14 @@ class SmartAsyncRPCManager:
     async def connect_all(self):
         """Initializes Web3 instances for all nodes."""
         logger.info(f"🔌 Connecting to Premium RPC (Tier 1): {self.premium_url[:40]}...")
-        self.premium_w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(self.premium_url))
+        self.premium_w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(
+            self.premium_url, request_kwargs={"timeout": 60}
+        ))
         
         for url in self.free_urls:
-            self.free_w3s[url] = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(url))
+            self.free_w3s[url] = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(
+                url, request_kwargs={"timeout": 60}
+            ))
             
         # Start background ranker
         asyncio.create_task(self._rank_nodes_loop())
@@ -466,7 +470,7 @@ SCAN_COOLDOWN_SECONDS = 2.0       # Strict 2.0s rate-limit delay
 MAX_SLIPPAGE_BPS = 50             # 0.5% max slippage for trade sizing
 SAFETY_MARGIN_MULTIPLIER = 1.5    # Extra margin on cost estimates to avoid NotProfitable
 LEG_A_SLIPPAGE_BPS = 50           # 0.5% slippage tolerance on Leg A output
-MULTICALL_CHUNK_SIZE = 3         # Max calls per tryAggregate to avoid gas limits
+MULTICALL_CHUNK_SIZE = 15        # Larger chunks = fewer HTTP requests = faster scans
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ROUTE CONFIDENCE — Tracks simulation failures per route
@@ -1029,8 +1033,13 @@ async def scan_and_execute(rpc_manager: SmartAsyncRPCManager, current_block: int
         # Execute ALL tasks concurrently - the RPCs can handle this now
         chunk_results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        # Flatten results
-        leg_a_results = [item for sublist in chunk_results for item in sublist]
+        # Flatten results (safely skip failed chunks)
+        leg_a_results = []
+        for sublist in chunk_results:
+            if isinstance(sublist, Exception):
+                logger.warning(f"⚠️ Leg A chunk failed: {sublist}")
+                continue
+            leg_a_results.extend(sublist)
 
     except Exception as e:
         logger.error(f"❌ Leg A Multicall failed: {e}")
@@ -1123,8 +1132,13 @@ async def scan_and_execute(rpc_manager: SmartAsyncRPCManager, current_block: int
         # Execute ALL tasks concurrently - the RPCs can handle this now
         chunk_results_b = await asyncio.gather(*tasks_b, return_exceptions=True)
         
-        # Flatten
-        leg_b_results = [item for sublist in chunk_results_b for item in sublist]
+        # Flatten (safely skip failed chunks)
+        leg_b_results = []
+        for sublist in chunk_results_b:
+            if isinstance(sublist, Exception):
+                logger.warning(f"⚠️ Leg B chunk failed: {sublist}")
+                continue
+            leg_b_results.extend(sublist)
 
     except Exception as e:
         logger.warning(f"⚠️ Leg B Multicall failed: {e}")
