@@ -262,27 +262,15 @@ def send_telegram_alert(msg, is_error=False):
 
 
 def build_token_map():
-    """Dynamically fetches Variable Debt Token addresses from Aave V3 PoolDataProvider."""
-    data_provider = rpc_manager.premium_w3.eth.contract(
-        address=DATA_PROVIDER_ADDRESS,
-        abi=DATA_PROVIDER_ABI
-    )
-    token_map = {}
-    for name, underlying in UNDERLYING_ASSETS.items():
-        try:
-            underlying_cs = Web3.to_checksum_address(underlying)
-            result = rpc_manager.call(data_provider.functions.getReserveTokensAddresses(underlying_cs).call, False, {'to': DATA_PROVIDER_ADDRESS})
-
-            var_debt_token = result[2]
-            # Skip if returned zero address (asset not active on Aave)
-            if var_debt_token == "0x0000000000000000000000000000000000000000":
-                print(f"  ⚠️ {name}: Not active on Aave, skipping.")
-                continue
-            token_map[f"{name}_Debt"] = var_debt_token
-            print(f"  ✅ {name}_Debt -> {var_debt_token}")
-        except Exception as e:
-            print(f"  ❌ Failed to fetch {name} debt token: {e}")
-    return token_map
+    """Hardcoded Variable Debt Token addresses for Aave V3 Arbitrum."""
+    return {
+        "USDC_Debt": "0x72a58b2A43d57dD690E261A703a74F038eFceCCa",
+        "USDC_e_Debt": "0x8b321D50E3E8b54D35123d4C19A0757758bcEE36",
+        "WETH_Debt": "0x0c84331e39d6658Cd6e6b9ba04736cC4c4734351",
+        "WBTC_Debt": "0x40aAb8dfE76bF9E013A43e0dD59BE808dD7B90f0",
+        "ARB_Debt": "0x9E306a4b16B4DffFaf3d03b0c5cb255dE0288E21",
+        "USDT_Debt": "0x8b193A17dD5634563CDeaD9B22288db70732E9D4"
+    }
 
 
 def get_target_path():

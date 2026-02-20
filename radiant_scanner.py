@@ -248,21 +248,14 @@ def send_telegram_alert(msg, is_error=False):
         pass
 
 def build_token_map():
-    data_provider = rpc_manager.premium_w3.eth.contract(address=DATA_PROVIDER_ADDRESS, abi=DATA_PROVIDER_ABI)
-    token_map = {}
-    for name, underlying in UNDERLYING_ASSETS.items():
-        try:
-            underlying_cs = Web3.to_checksum_address(underlying)
-            result = rpc_manager.call(data_provider.functions.getReserveTokensAddresses(underlying_cs).call, False, {'to': DATA_PROVIDER_ADDRESS})
-            var_debt_token = result[2]
-            if var_debt_token == "0x0000000000000000000000000000000000000000":
-                print(f"  ⚠️ {name}: Not active on Radiant, skipping.")
-                continue
-            token_map[f"{name}_Debt"] = var_debt_token
-            print(f"  ✅ {name}_Debt -> {var_debt_token}")
-        except Exception as e:
-            print(f"  ❌ Failed to fetch {name} debt token: {e}")
-    return token_map
+    """Hardcoded Variable Debt Token addresses for Radiant V2 Arbitrum."""
+    return {
+        "USDC_e_Debt": "0xf92d501e74bd1e4308E6676C38Ab4d84389d7Bf3",
+        "WETH_Debt": "0x4e75D4bc81D9AD1a1abc972a3dd53d581e1CE16b",
+        "WBTC_Debt": "0x0e16bAE17C61789d8a96Ea6529d788B633C4c8B6",
+        "USDT_Debt": "0x9C3A8644A9cA181b90094be98dC19496F6b38a24",
+        "ARB_Debt": "0x24C65D9Cbb174e92a472cbaDE2830fB54b6d36e2"
+    }
 
 def get_target_path():
     if os.path.exists("/root/Arbitrum"):
