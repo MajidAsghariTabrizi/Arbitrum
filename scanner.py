@@ -139,8 +139,8 @@ class SmartSyncRPCManager:
             error_str = str(e).lower()
             
             if "no_free_nodes" in error_str:
-                print("⏳ No Free Nodes available. Sleeping for 10s before retry...")
-                time.sleep(10)
+                print("⏳ No Free Nodes available. Sleeping for 60s before retry...")
+                time.sleep(60)
                 return self.call(func, is_critical, *args, **kwargs)
                 
             w3_instance = self.get_optimal_w3(is_critical)
@@ -148,12 +148,14 @@ class SmartSyncRPCManager:
 
             if "429" in error_str or "403" in error_str or "too many requests" in error_str or "forbidden" in error_str or "timeout" in error_str:
                 self.handle_rate_limit(url_failed)
+                time.sleep(2.0 + random.uniform(0.1, 1.0)) # Jittered wait before jumping to next node
                 # Retry recursively with the next best node
                 return self.call(func, is_critical, *args, **kwargs)
             else:
                 self.strike_counts[url_failed] += 1
                 if self.strike_counts[url_failed] >= 3:
                      self.handle_rate_limit(url_failed)
+                     time.sleep(2.0 + random.uniform(0.1, 1.0)) # Jittered wait before jumping to next node
                      return self.call(func, is_critical, *args, **kwargs)
                 raise e
 
