@@ -167,63 +167,124 @@ FLASHLOAN_USDC_AMOUNT = 1000 * 10**USDC_DECIMALS  # $1,000
 # ASYNC RPC MANAGER
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class AsyncRPCManager:
-    """Manages RPC endpoints with automatic failover for 429 AND 403 errors."""
+# ═══════════════════════════════════════════════════════════════════════════════
+# SMART ASYNC RPC MANAGER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class SmartAsyncRPCManager:
+    """
+    Tiered RPC Router:
+    - Tier 1 (Premium): PRIMARY_RPC (QuickNode, etc.) - Used for execution & high volatility.
+    - Tier 2 (Free): FALLBACK_RPCS - Used for polling and routine tasks.
+    Ranks Tier 2 nodes every 60s based on latency.
+    """
     def __init__(self):
-        self.endpoints = [PRIMARY_RPC] + FALLBACK_RPCS
-        self.current_index = 0
-        self.strike_count = 0
-        self.w3 = None
-
-    async def connect(self):
-        """Connect to the current RPC endpoint. Closes any existing session first."""
-        # Gracefully close the previous aiohttp session
-        # Gracefully close the previous aiohttp session to prevent memory leaks
-        if self.w3 and hasattr(self.w3.provider, '_request_kwargs'):
-            try:
-                session = await self.w3.provider.cache_async_session(None)
-                if session and not session.closed:
-                    await session.close()
-                    logger.info("🔒 Previous aiohttp session closed cleanly.")
-            except Exception:
-                pass
-
-        url = self.endpoints[self.current_index]
-        logger.info(f"🔌 Connecting to RPC: {url[:40]}...")
-        self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(url))
-            
-        try:
-            connected = await self.w3.is_connected()
-            if not connected:
-                logger.warning(f"⚠️ RPC {url[:40]} might be down, but continuing...")
-        except Exception as e:
-            logger.warning(f"⚠️ Connection test failed (likely rate limit), bypassing: {e}")
-            
-        logger.info(f"🟢 Connected to RPC [{self.current_index + 1}/{len(self.endpoints)}]")
-
-    async def handle_rate_limit(self):
-        """Handle 429/403 errors with exponential backoff and failover."""
-        self.strike_count += 1
+        self.premium_url = PRIMARY_RPC
+        self.free_urls = FALLBACK_RPCS.copy()
         
-        if self.strike_count >= 3:
-            self.strike_count = 0
-            self.current_index = (self.current_index + 1) % len(self.endpoints)
-            logger.warning(f"🔄 3 strikes! Switching to RPC [{self.current_index + 1}/{len(self.endpoints)}]")
-            await self.connect()
-        else:
-            cooldown = min(16, (2 ** self.strike_count)) + random.uniform(0.1, 1.0)
-            logger.warning(f"⏳ Rate limited (Strike {self.strike_count}/3). Cooling down {cooldown:.2f}s...")
+        # Connection Pools
+        self.premium_w3 = None
+        self.free_w3s: Dict[str, AsyncWeb3] = {}
+        
+        # Tier 2 Rankings: [{"url": str, "latency": float, "is_blacklisted": bool, "blacklist_until": float}]
+        self.free_nodes_rank = [{"url": url, "latency": 999.0, "is_blacklisted": False, "blacklist_until": 0} for url in self.free_urls]
+        self.strike_counts: Dict[str, int] = {url: 0 for url in self.free_urls}
+        
+    async def connect_all(self):
+        """Initializes Web3 instances for all nodes."""
+        logger.info(f"🔌 Connecting to Premium RPC (Tier 1): {self.premium_url[:40]}...")
+        self.premium_w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(self.premium_url))
+        
+        for url in self.free_urls:
+            self.free_w3s[url] = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(url))
+            
+        # Start background ranker
+        asyncio.create_task(self._rank_nodes_loop())
+        logger.info(f"🟢 Smart RPC Manager Initialized ({len(self.free_urls)} Free Nodes).")
+
+    async def _rank_nodes_loop(self):
+        """Background task that pings Tier 2 nodes every 60s."""
+        while True:
+            await self.rank_free_nodes()
+            await asyncio.sleep(60)
+
+    async def rank_free_nodes(self):
+        """Pings all free nodes and updates their latency."""
+        now = time.time()
+        
+        for node in self.free_nodes_rank:
+            # Un-blacklist if time has passed
+            if node["is_blacklisted"] and now > node["blacklist_until"]:
+                node["is_blacklisted"] = False
+                node["latency"] = 999.0 # Reset
+                self.strike_counts[node["url"]] = 0
+                logger.info(f"🟢 Node un-blacklisted: {node['url'][:40]}...")
+
+            if node["is_blacklisted"]:
+                continue
+
+            # Ping test
+            w3 = self.free_w3s[node["url"]]
+            start = time.time()
+            try:
+                # 3-second strict timeout for ping
+                await asyncio.wait_for(w3.eth.block_number, timeout=3.0)
+                node["latency"] = time.time() - start
+            except Exception:
+                # Penalty for failing ping, but not immediate blacklisting
+                node["latency"] = 999.0
+        
+        # Sort by latency (lowest first, blacklisted at the bottom)
+        self.free_nodes_rank.sort(key=lambda x: (x["is_blacklisted"], x["latency"]))
+
+    async def get_optimal_w3(self, is_critical=False, sentinel: MarketSentinel = None) -> AsyncWeb3:
+        """
+        Routes the request.
+        is_critical=True OR sentinel.is_high_volatility == True -> Premium Node
+        is_critical=False -> Best available Free Node
+        """
+        if is_critical or (sentinel and sentinel.is_high_volatility):
+            return self.premium_w3
+
+        # Find best free node
+        for node in self.free_nodes_rank:
+            if not node["is_blacklisted"]:
+                return self.free_w3s[node["url"]]
+                
+        # Failsafe: if ALL free nodes are blacklisted, fallback to premium temporarily
+        logger.warning("⚠️ All Free Nodes blacklisted! Falling back to Premium Node temporarily.")
+        return self.premium_w3
+
+    async def handle_rate_limit(self, w3_instance: AsyncWeb3):
+        """
+        If a Free node hits 429, blacklist it for 5 minutes.
+        If the Premium node hits 429, apply exponential backoff.
+        """
+        url_failed = w3_instance.provider.endpoint_uri
+        
+        if url_failed == self.premium_url:
+            self.strike_counts["premium"] = self.strike_counts.get("premium", 0) + 1
+            cooldown = min(16, (2 ** self.strike_counts["premium"])) + random.uniform(0.1, 1.0)
+            logger.warning(f"💎 PREMIUM Rate limited (Strike {self.strike_counts['premium']}). Cooling down {cooldown:.2f}s...")
             await asyncio.sleep(cooldown)
+        else:
+            for node in self.free_nodes_rank:
+                if node["url"] == url_failed:
+                    self.strike_counts[url_failed] += 1
+                    if self.strike_counts[url_failed] >= 3:
+                        node["is_blacklisted"] = True
+                        node["blacklist_until"] = time.time() + 300 # 5 minutes
+                        logger.warning(f"🚫 Free Node Blacklisted (5m): {url_failed[:40]}...")
+                    else:
+                        logger.warning(f"🐌 Free Node Strike {self.strike_counts[url_failed]}/3: {url_failed[:40]}...")
+                    break
+            
+            # Re-sort to push blacklisted down
+            self.free_nodes_rank.sort(key=lambda x: (x["is_blacklisted"], x["latency"]))
 
     def is_rate_limit_error(self, error):
-        """Check if an error is a rate limit / forbidden error."""
         err_str = str(error).lower()
-        return any(k in err_str for k in ["429", "403", "rate", "forbidden", "quota", "too many requests", "-32001"])
-
-    async def get_w3(self) -> AsyncWeb3:
-        if self.w3 is None:
-            await self.connect()
-        return self.w3
+        return any(k in err_str for k in ["429", "403", "rate", "forbidden", "quota", "too many requests", "-32001", "timeout"])
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # DEX CONFIGURATION — Arbitrum Mainnet (Real Addresses)
@@ -701,16 +762,13 @@ def build_curve_swap_calldata(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 async def execute_arbitrage(
-    w3: AsyncWeb3,
-    token_symbol: str,
-    token_address: str,
-    dex_a: str,
-    dex_b: str,
-    flashloan_usdc: int,
-    leg_a_token_out: int,
-    leg_b_usdc_out: int,
-    net_profit_usd: float,
-) -> Optional[str]:
+    rpc_manager: SmartAsyncRPCManager,
+    route_details: dict,
+    gross_profit_usd: float,
+    eth_price_usd: float,
+    current_block: int
+):
+    """Executes the flash loan and multi-DEX swap via the smart contract using Tier 1 RPC."""
     """
     Build, simulate, and broadcast an arbitrage transaction.
 
@@ -829,10 +887,10 @@ async def execute_arbitrage(
 
         # ── Broadcast ──
         signed_tx = w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
-        tx_hash = await w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+        tx_hash = await w3.eth.send_raw_transaction(signed_tx.rawTransaction)
         tx_hash_hex = tx_hash.hex()
 
-        logger.info(f"🚀 TX SENT: {tx_hash_hex} | {token_symbol} | +${net_profit_usd:.2f}")
+        logger.info(f"🚀 TX SENT: {tx_hash_hex} | {token_symbol} | +${gross_profit_usd:.2f}")
 
         # Log to database
         db_manager.record_arb_execution(
@@ -840,7 +898,7 @@ async def execute_arbitrage(
             token_pair=f"{token_symbol}/USDC",
             dex_a=dex_a,
             dex_b=dex_b,
-            profit_usd=net_profit_usd,
+            profit_usd=gross_profit_usd,
         )
 
         # Telegram notification
@@ -868,32 +926,39 @@ async def execute_arbitrage(
 # MAIN SCANNING LOOP
 # ═══════════════════════════════════════════════════════════════════════════════
 
-async def get_eth_price(rpc_manager: AsyncRPCManager) -> float:
-    """Get ETH price in USD via Multicall (1 call)."""
-    try:
-        w3 = await rpc_manager.get_w3()
-        multicall = w3.eth.contract(address=w3.to_checksum_address(MULTICALL3_ADDRESS), abi=MULTICALL3_ABI)
+async def get_eth_price(rpc_manager: SmartAsyncRPCManager) -> float:
+    """Fetch ETH price efficiently using Multicall3 on a Free Tier Node."""
+    while True:
+        try:
+            w3 = await rpc_manager.get_optimal_w3(is_critical=False)
+            multicall = w3.eth.contract(address=MULTICALL3_ADDRESS, abi=MULTICALL3_ABI)
         
-        # Quote 1 WETH → USDC on UniV3 0.05%
-        target, data = _encode_quoter_call(
-            w3, UNI_V3_QUOTER, 
-            TOKENS["WETH"]["address"], USDC_ADDRESS, 
-            10**18, 500, DEXES["Uniswap_V3"] # Pass the full DEX config
-        )
-        
-        result = await multicall.functions.tryAggregate(False, [(target, data)]).call()
-        success, ret_bytes = result[0]
-        
-        if success:
-            quote = _decode_quoter_result(ret_bytes, "v3")
-            return quote / (10 ** USDC_DECIMALS)
+            # Quote 1 WETH → USDC on UniV3 0.05%
+            target, data = _encode_quoter_call(
+                w3, UNI_V3_QUOTER, 
+                TOKENS["WETH"]["address"], USDC_ADDRESS, 
+                10**18, 500, DEXES["Uniswap_V3"] # Pass the full DEX config
+            )
             
-    except Exception:
-        pass
-    return 2500.0  # Fallback estimate
+            result = await multicall.functions.tryAggregate(False, [(target, data)]).call()
+            success, ret_bytes = result[0]
+            
+            if success:
+                quote = _decode_quoter_result(ret_bytes, "v3")
+                return quote / (10 ** USDC_DECIMALS)
+                
+        except Exception as e:
+            if rpc_manager.is_rate_limit_error(e):
+                logger.warning("🐌 Rate limit on ETH price fetch. Yielding to backoff...")
+                await rpc_manager.handle_rate_limit(w3)
+            else:
+                logger.error(f"⚠️ Error fetching ETH price: {e}")
+                logger.debug(traceback.format_exc())
+            await asyncio.sleep(5) # Wait before retrying
+        return 2500.0  # Fallback estimate
 
 
-async def scan_and_execute(rpc_manager: AsyncRPCManager, block_number: int, eth_price_usd: float):
+async def scan_and_execute(rpc_manager: SmartAsyncRPCManager, current_block: int, eth_price_usd: float, sentinel: MarketSentinel = None):
     """
     2-Step Multicall3 Scan Loop (0 Rate Limits).
     
@@ -901,9 +966,13 @@ async def scan_and_execute(rpc_manager: AsyncRPCManager, block_number: int, eth_
     Leg B Batch: Token → USDC per (DEX, Fee) using Leg A output  [1 RPC Call]
     Execute: If Leg B output > flashloan + fees
     """
+    valid_routes = []
+    
+    # Check allowances asynchronously but only periodically (or implement properly)
+    # asyncio.create_task(check_contract_allowance(rpc_manager))
     spreads_found = 0
     now = time.time()
-    w3 = await rpc_manager.get_w3()
+    w3 = await rpc_manager.get_optimal_w3(is_critical=True)
     multicall = w3.eth.contract(address=w3.to_checksum_address(MULTICALL3_ADDRESS), abi=MULTICALL3_ABI)
     
     # ════════════════════════════════════════════════════════════════════════════
@@ -1112,15 +1181,19 @@ async def scan_and_execute(rpc_manager: AsyncRPCManager, block_number: int, eth_
 
             # Fire execution
             tx_hash = await execute_arbitrage(
-                w3=w3,
-                token_symbol=symbol,
-                token_address=TOKENS[symbol]["address"],
-                dex_a=buy_dex,
-                dex_b=sell_dex,
-                flashloan_usdc=FLASHLOAN_USDC_AMOUNT,
-                leg_a_token_out=amount_in_token,
-                leg_b_usdc_out=amount_out_usdc,
-                net_profit_usd=net_profit,
+                rpc_manager=rpc_manager,
+                route_details={
+                    "token_symbol": symbol,
+                    "token_address": TOKENS[symbol]["address"],
+                    "dex_a": buy_dex,
+                    "dex_b": sell_dex,
+                    "flashloan_usdc": FLASHLOAN_USDC_AMOUNT,
+                    "leg_a_token_out": amount_in_token,
+                    "leg_b_usdc_out": amount_out_usdc
+                },
+                gross_profit_usd=net_profit,
+                eth_price_usd=eth_price_usd,
+                current_block=current_block
             )
             
             route_key = f"{symbol}/{buy_dex}/{sell_dex}"
@@ -1144,9 +1217,12 @@ async def main():
     logger.info("═══════════════════════════════════════════════════════════")
     
     # Initialize RPC Manager
-    rpc_manager = AsyncRPCManager()
-    await rpc_manager.connect()
+    rpc_manager = SmartAsyncRPCManager()
+    await rpc_manager.connect_all()
     
+    # Start background task for RPC ranking
+    asyncio.create_task(rpc_manager._rank_nodes_loop())
+
     logger.info(f"📊 Scanning {len(TOKENS)} tokens across {len(DEXES)} DEXs")
     logger.info(f"🎯 Tokens: {', '.join(TOKENS.keys())}")
     logger.info(f"🏪 DEXs: {', '.join(DEXES.keys())}")
@@ -1156,7 +1232,7 @@ async def main():
     # --- STARTUP PROTECTION ---
     while True:
         try:
-            w3 = await rpc_manager.get_w3()
+            w3 = await rpc_manager.get_optimal_w3(is_critical=False)
             chain_id = await w3.eth.chain_id
             logger.info(f"✅ Connected to chain {chain_id}")
 
@@ -1185,7 +1261,7 @@ async def main():
         except Exception as e:
             if rpc_manager.is_rate_limit_error(e):
                 logger.warning("🐌 Rate limit on STARTUP. Yielding to backoff...")
-                await rpc_manager.handle_rate_limit()
+                await rpc_manager.handle_rate_limit(w3)
             else:
                 logger.error(f"💥 Fatal Startup Error: {e}")
                 await asyncio.sleep(5)
@@ -1223,7 +1299,7 @@ async def main():
                 logger.info(f"📈 ETH Price refreshed: ${eth_price_usd:,.0f}")
 
             # ── Run scan ──
-            spreads = await scan_and_execute(rpc_manager, current_block, eth_price_usd)
+            spreads = await scan_and_execute(rpc_manager, current_block, eth_price_usd, sentinel=sentinel)
 
             scan_duration = time.time() - scan_start
             blocks_jumped = current_block - last_block if last_block > 0 else 1

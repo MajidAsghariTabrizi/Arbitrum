@@ -19,6 +19,11 @@ class MarketSentinel:
         self.last_scan_time = 0
         self.current_price = 0.0
         self.last_fail_time = 0
+        
+        # Smart RPC Router State
+        self.is_high_volatility = False
+        self.volatility_timestamp = 0
+        self.volatility_cooldown_sec = 60
 
     async def fetch_price(self) -> float:
         """Fetches the current price of the asset from Binance API."""
@@ -61,7 +66,15 @@ class MarketSentinel:
         price_diff_pct = abs(self.current_price - self.last_price) / self.last_price * 100.0
         if price_diff_pct > self.threshold_pct:
             logger.info(f"🚨 Volatility Spike! {self.symbol} moved {price_diff_pct:.3f}% (Price: ${self.current_price:.2f})")
+            self.is_high_volatility = True
+            self.volatility_timestamp = current_time
             return True
+
+        # Check Volatility Cooldown
+        if self.is_high_volatility:
+            if current_time - self.volatility_timestamp >= self.volatility_cooldown_sec:
+                self.is_high_volatility = False
+                logger.info("📉 Market relaxed. Volatility premium mode deactivated.")
 
         return False
 

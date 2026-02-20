@@ -2,6 +2,8 @@ import os
 import json
 import time
 import requests
+import traceback
+import threading
 from web3 import Web3
 from dotenv import load_dotenv
 from eth_abi import decode
@@ -10,98 +12,147 @@ from eth_abi import decode
 load_dotenv()
 
 # --- RPC MANAGER ---
-class SyncRPCManager:
+class SmartSyncRPCManager:
+    """
+    Tiered Sync RPC Router:
+    - Tier 1 (Premium): PRIMARY_RPC (QuickNode, etc.)
+    - Tier 2 (Free): FALLBACK_RPCS
+    """
     def __init__(self):
-        self.primary_rpc = os.getenv("PRIMARY_RPC")
-        self.fallback_rpcs = os.getenv("FALLBACK_RPCS", "").split(",")
-        self.fallback_rpcs = [url.strip() for url in self.fallback_rpcs if url.strip()]
+        self.premium_url = os.getenv("PRIMARY_RPC")
+        fallback_rpcs_raw = os.getenv("FALLBACK_RPCS", "").split(",")
+        self.free_urls = [url.strip() for url in fallback_rpcs_raw if url.strip()]
 
-        self.active_rpc_index = -1
-        self.w3 = Web3(Web3.HTTPProvider(self.primary_rpc, request_kwargs={'timeout': 60}))
-
-        self.rpc_delay = 0.1
-        self.consecutive_errors = 0
-
-        if not self.primary_rpc:
+        if not self.premium_url:
             print("❌ PRIMARY_RPC not found in .env")
             exit()
 
-    def check_primary_health(self):
-        if self.active_rpc_index == -1:
-            return
+        # Connection Pools
+        self.premium_w3 = Web3(Web3.HTTPProvider(self.premium_url, request_kwargs={'timeout': 60}))
+        self.free_w3s = {url: Web3(Web3.HTTPProvider(url, request_kwargs={'timeout': 60})) for url in self.free_urls}
+        
+        # Tier 2 Rankings: [{"url": str, "latency": float, "is_blacklisted": bool, "blacklist_until": float}]
+        self.free_nodes_rank = [{"url": url, "latency": 999.0, "is_blacklisted": False, "blacklist_until": 0} for url in self.free_urls]
+        self.strike_counts = {url: 0 for url in self.free_urls}
+        self.strike_counts["premium"] = 0
 
-        try:
-            temp_w3 = Web3(Web3.HTTPProvider(self.primary_rpc, request_kwargs={'timeout': 10}))
-            temp_w3.eth.block_number
-            print("\n🟢 Primary RPC checked OK. Switching back!")
-            self.w3 = temp_w3
-            self.active_rpc_index = -1
-            self.rpc_delay = 0.1
-            self.consecutive_errors = 0
-            send_telegram_alert("🟢 <b>Primary RPC Restored.</b> Switched back to main node.")
-        except Exception:
-            pass
+        # Start background ranker thread
+        self.ranker_thread = threading.Thread(target=self._rank_nodes_loop, daemon=True)
+        self.ranker_thread.start()
+        print(f"🟢 Smart Sync RPC Manager Initialized ({len(self.free_urls)} Free Nodes).")
 
-    def handle_failure(self):
-        print(f"⚠️ RPC Failure ({self.consecutive_errors} strikes). Switching...")
-        next_idx = self.active_rpc_index + 1
-        if next_idx < len(self.fallback_rpcs):
-            new_url = self.fallback_rpcs[next_idx]
-            self.active_rpc_index = next_idx
-            self.w3 = Web3(Web3.HTTPProvider(new_url, request_kwargs={'timeout': 60}))
-            self.rpc_delay = 0.5
-            self.consecutive_errors = 0
-            msg = f"⚠️ <b>Primary RPC Failed.</b> Switching to Fallback #{next_idx + 1}."
-            print(f"🔄 Switched to Fallback: {new_url} (Delay: {self.rpc_delay}s)")
-            send_telegram_alert(msg, is_error=True)
-            return True
+    def _rank_nodes_loop(self):
+        """Background thread that pings Tier 2 nodes every 60s."""
+        while True:
+            self.rank_free_nodes()
+            time.sleep(60)
+
+    def rank_free_nodes(self):
+        """Pings all free nodes and updates their latency."""
+        now = time.time()
+        for node in self.free_nodes_rank:
+            # Un-blacklist if time has passed
+            if node["is_blacklisted"] and now > node["blacklist_until"]:
+                node["is_blacklisted"] = False
+                node["latency"] = 999.0 # Reset
+                self.strike_counts[node["url"]] = 0
+                print(f"🟢 Node un-blacklisted: {node['url'][:40]}...")
+
+            if node["is_blacklisted"]:
+                continue
+
+            # Ping test with strict 3s timeout
+            url = node["url"]
+            start_time = time.time()
+            try:
+                # We create a temporary w3 with a short timeout just for pinging
+                temp_w3 = Web3(Web3.HTTPProvider(url, request_kwargs={'timeout': 3}))
+                temp_w3.eth.block_number
+                node["latency"] = time.time() - start_time
+            except Exception:
+                node["latency"] = 999.0
+        
+        # Sort by latency
+        self.free_nodes_rank.sort(key=lambda x: (x["is_blacklisted"], x["latency"]))
+
+    def get_optimal_w3(self, is_critical=False) -> Web3:
+        """
+        Routes the request.
+        is_critical=True -> Premium Node
+        is_critical=False -> Best available Free Node
+        """
+        if is_critical:
+            return self.premium_w3
+
+        # Find best free node
+        for node in self.free_nodes_rank:
+            if not node["is_blacklisted"]:
+                return self.free_w3s[node["url"]]
+                
+        # Failsafe
+        print("⚠️ All Free Nodes blacklisted! Falling back to Premium Node temporarily.")
+        return self.premium_w3
+
+    def handle_rate_limit(self, url_failed: str):
+        """Handles backoffs and blacklists per node."""
+        if url_failed == self.premium_url:
+            self.strike_counts["premium"] = self.strike_counts.get("premium", 0) + 1
+            cooldown = min(120, 2 ** self.strike_counts["premium"])
+            print(f"💎 PREMIUM Rate limited (Strike {self.strike_counts['premium']}). Cooling down {cooldown}s...")
+            time.sleep(cooldown)
         else:
-            backoff = min(120, 2 ** self.consecutive_errors)
-            print(f"❌ All Fallbacks exhausted. Sleeping {backoff}s before Resetting to Primary.")
-            time.sleep(backoff)
-            self.active_rpc_index = -1
-            self.w3 = Web3(Web3.HTTPProvider(self.primary_rpc, request_kwargs={'timeout': 60}))
-            self.rpc_delay = 0.1
-            self.consecutive_errors = 0
-            return False
+            for node in self.free_nodes_rank:
+                if node["url"] == url_failed:
+                    self.strike_counts[url_failed] += 1
+                    if self.strike_counts[url_failed] >= 3:
+                        node["is_blacklisted"] = True
+                        node["blacklist_until"] = time.time() + 300 # 5 minutes
+                        print(f"🚫 Free Node Blacklisted (5m): {url_failed[:40]}...")
+                    else:
+                        print(f"🐌 Free Node Strike {self.strike_counts[url_failed]}/3: {url_failed[:40]}...")
+                    break
+            
+            # Re-sort to push blacklisted down
+            self.free_nodes_rank.sort(key=lambda x: (x["is_blacklisted"], x["latency"]))
 
-    def call(self, func, *args, **kwargs):
-        delay = 0.5 if self.active_rpc_index >= 0 else self.rpc_delay
-        time.sleep(delay)
-
+    def call(self, func, is_critical=False, *args, **kwargs):
+        """Wrapper for Web3 calls with Smart Routing & Rate Limiting."""
         try:
-            return func(*args, **kwargs)
+            w3_instance = self.get_optimal_w3(is_critical)
+            
+            # We need to extract the actual function from the correctly routed w3 instance
+            # Extract func name, e.g., 'get_logs' from bounds method
+            func_name = func.__name__
+            
+            # It's safer to re-bind the function to the optimal w3 instance
+            if hasattr(w3_instance.eth, func_name):
+                optimal_func = getattr(w3_instance.eth, func_name)
+            else:
+                 optimal_func = func # Fallback if not an eth method
+
+            return optimal_func(*args, **kwargs)
+
         except Exception as e:
             error_str = str(e).lower()
-            # Adaptive Backoff for Rate Limits (handles 429 AND 403)
-            if "429" in error_str or "403" in error_str or "too many requests" in error_str or "forbidden" in error_str:
-                self.consecutive_errors += 1
-                backoff = min(120, 2 ** self.consecutive_errors)
-                print(f"⚠️ Rate Limit Hit (Strike {self.consecutive_errors}/3). CAUTION: Cooling down for {backoff}s...")
-                time.sleep(backoff)
+            
+            w3_instance = self.get_optimal_w3(is_critical)
+            url_failed = w3_instance.provider.endpoint_uri
 
-                # Adaptive Penalty
-                if self.active_rpc_index == -1:
-                    self.rpc_delay += 0.1  # More aggressive backoff
-                    print(f"🐌 Increased Primary Delay to {self.rpc_delay:.2f}s")
-                if self.consecutive_errors >= 3:
-                    if self.handle_failure():
-                        return self.call(func, *args, **kwargs)
-                    else:
-                        raise e
-                else:
-                    return self.call(func, *args, **kwargs)
+            if "429" in error_str or "403" in error_str or "too many requests" in error_str or "forbidden" in error_str or "timeout" in error_str:
+                self.handle_rate_limit(url_failed)
+                # Retry recursively with the next best node
+                return self.call(func, is_critical, *args, **kwargs)
             else:
-                self.consecutive_errors += 1
-                if self.consecutive_errors >= 3:
-                    if self.handle_failure():
-                        return self.call(func, *args, **kwargs)
-                    else:
-                        raise e
+                self.strike_counts[url_failed] += 1
+                if self.strike_counts[url_failed] >= 3:
+                     self.handle_rate_limit(url_failed)
+                     return self.call(func, is_critical, *args, **kwargs)
                 raise e
 
 
-rpc_manager = SyncRPCManager()
+rpc_manager = SmartSyncRPCManager()
+# w3 globally needed for utility formatting in scanner
+w3 = rpc_manager.premium_w3
 
 # --- CONFIGURATION (RADIANT SPECIFIC) ---
 POOL_ADDRESSES_PROVIDER = Web3.to_checksum_address("0x2032b9A8e9F7e76768CA9271003d3e43E1616B1F") # Updated Provider
@@ -195,7 +246,7 @@ def build_token_map():
     for name, underlying in UNDERLYING_ASSETS.items():
         try:
             underlying_cs = Web3.to_checksum_address(underlying)
-            result = rpc_manager.call(data_provider.functions.getReserveTokensAddresses(underlying_cs).call)
+            result = rpc_manager.call(data_provider.functions.getReserveTokensAddresses(underlying_cs).call, is_critical=False)
             var_debt_token = result[2]
             if var_debt_token == "0x0000000000000000000000000000000000000000":
                 print(f"  ⚠️ {name}: Not active on Radiant, skipping.")
@@ -224,14 +275,14 @@ def classify_targets_multicall(all_users_list):
     # 1. Fetch dynamic pool address first
     addresses_provider = w3.eth.contract(address=POOL_ADDRESSES_PROVIDER, abi=ADDRESSES_PROVIDER_ABI)
     try:
-        dynamic_pool_address = rpc_manager.call(addresses_provider.functions.getLendingPool().call)
+        dynamic_pool_address = rpc_manager.call(addresses_provider.functions.getLendingPool().call, is_critical=False)
     except Exception as e:
         print(f"  ❌ Failed to fetch dynamic Pool Address: {e}")
         return {"tier_1_danger": [], "tier_2_watchlist": []}
 
     # 2. Instantiate pool with dynamic address
     pool = w3.eth.contract(address=dynamic_pool_address, abi=POOL_ABI)
-    multicall = w3.eth.contract(address=MULTICALL3_ADDRESS, abi=MULTICALL3_ABI)
+    multicall_contract = w3.eth.contract(address=MULTICALL3_ADDRESS, abi=MULTICALL3_ABI)
     tier_1 = []
     tier_2 = []
     discarded = 0
@@ -250,7 +301,9 @@ def classify_targets_multicall(all_users_list):
             continue
         
         try:
-            _, return_data = rpc_manager.call(multicall.functions.aggregate(calls).call)
+            _, return_data = rpc_manager.call(
+                multicall_contract.functions.aggregate(calls).call, is_critical=False
+            )
         except Exception as e:
             print(f"  ⚠️ Multicall batch failed: {e}")
             continue
@@ -278,14 +331,23 @@ def classify_targets_multicall(all_users_list):
     return {"tier_1_danger": tier_1, "tier_2_watchlist": tier_2}
 
 def scan_debt_tokens():
-    global RPC_WAS_DOWN
-    rpc_manager.check_primary_health()
-    w3 = rpc_manager.w3
+    # 1. Proactive Health Check (Auto-Recovery)
+    # rpc_manager.check_primary_health()
+    w3 = rpc_manager.premium_w3  # Get current active instance
+
+    print("═══════════════════════════════════════════════════════════")
+    
+    # Pre-ping logic
+    rpc_manager.rank_free_nodes()
+    
     try:
-        current_block = rpc_manager.call(lambda: w3.eth.block_number)
+        current_block = rpc_manager.call(w3.eth.get_block_number, is_critical=False)
+        print(f"📍 Baseline Block: {current_block}")
     except Exception as e:
         error_msg = str(e)
-        rpc_manager.handle_failure()
+        # The original code had rpc_manager.handle_failure() here, but it's not defined in the provided class.
+        # Assuming it was meant to be a general error handling or a method that was removed.
+        # For now, just log and return.
         if not RPC_WAS_DOWN:
             send_telegram_alert(f"⚠️ Radiant Scanner RPC Down: {error_msg}", is_error=True)
             RPC_WAS_DOWN = True
@@ -318,7 +380,7 @@ def scan_debt_tokens():
                 print(f"   ⏳ Block: {chunk_start}-{chunk_end} (Size: {chunk_end - chunk_start + 1}) | Found: {len(all_users)}", end="\r")
 
                 try:
-                    logs = rpc_manager.call(w3.eth.get_logs, {
+                    logs = rpc_manager.call(w3.eth.get_logs, False, {
                         'fromBlock': hex(int(chunk_start)),
                         'toBlock': hex(int(chunk_end)),
                         'address': Web3.to_checksum_address(address),
