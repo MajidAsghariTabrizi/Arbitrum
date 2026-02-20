@@ -282,21 +282,9 @@ class RadiantBot:
         self.liquidator_contract = self.w3.eth.contract(address=LIQUIDATOR_ADDRESS, abi=LIQUIDATOR_ABI)
 
         # Dynamic Pool Fetch
-        while True:
-            try:
-                 pool_addr = await self.addresses_provider.functions.getLendingPool().call()
-                 logger.info(f"🏊 Radiant Lending Pool found at: {pool_addr}")
-                 self.pool = self.w3.eth.contract(address=pool_addr, abi=POOL_ABI)
-                 break
-            except Exception as e:
-                 if self.rpc.is_rate_limit_error(e):
-                     logger.warning(f"🐌 Rate limit fetching Lending Pool. Yielding to backoff...")
-                     await self.rpc.handle_rate_limit()
-                 else:
-                     logger.error(f"❌ Failed to fetch Lending Pool address: {e}")
-                     raise e
-
-
+        pool_addr = await self.addresses_provider.functions.getLendingPool().call()
+        logger.info(f"🏊 Radiant Lending Pool found at: {pool_addr}")
+        self.pool = self.w3.eth.contract(address=pool_addr, abi=POOL_ABI)
         # Multicall3 — used for batched health-factor checks
         self.multicall = self.w3.eth.contract(address=MULTICALL3_ADDRESS, abi=MULTICALL3_ABI)
 
