@@ -1026,13 +1026,8 @@ async def scan_and_execute(rpc_manager: SmartAsyncRPCManager, current_block: int
                 multicall.functions.tryAggregate(False, chunk).call({'gas': 50_000_000})
             )
             
-        # Fire all chunks
-        chunk_results = []
-        task_chunks = [tasks[x:x+MULTICALL_CHUNK_SIZE] for x in range(0, len(tasks), MULTICALL_CHUNK_SIZE)]
-        for t_chunk in task_chunks:
-            res = await asyncio.gather(*t_chunk, return_exceptions=True)
-            chunk_results.extend(res)
-            await asyncio.sleep(0.15)  # Tiny delay to bypass free-tier firewalls
+        # Execute ALL tasks concurrently - the RPCs can handle this now
+        chunk_results = await asyncio.gather(*tasks, return_exceptions=True)
         
         # Flatten results
         leg_a_results = [item for sublist in chunk_results for item in sublist]
@@ -1125,12 +1120,8 @@ async def scan_and_execute(rpc_manager: SmartAsyncRPCManager, current_block: int
                 multicall.functions.tryAggregate(False, chunk).call({'gas': 50_000_000})
             )
             
-        chunk_results_b = []
-        task_chunks_b = [tasks_b[x:x+MULTICALL_CHUNK_SIZE] for x in range(0, len(tasks_b), MULTICALL_CHUNK_SIZE)]
-        for t_chunk in task_chunks_b:
-            res = await asyncio.gather(*t_chunk, return_exceptions=True)
-            chunk_results_b.extend(res)
-            await asyncio.sleep(0.15)  # Tiny delay to bypass free-tier firewalls
+        # Execute ALL tasks concurrently - the RPCs can handle this now
+        chunk_results_b = await asyncio.gather(*tasks_b, return_exceptions=True)
         
         # Flatten
         leg_b_results = [item for sublist in chunk_results_b for item in sublist]

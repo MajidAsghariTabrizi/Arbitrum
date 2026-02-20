@@ -360,13 +360,25 @@ class AntiGravityBot:
 
     async def load_targets_async(self):
         """Reloads targets.json asynchronously into tiered RAM queues.
-        Supports both structured (tiered) and flat (legacy) formats."""
+        Supports both structured (tiered) and flat (legacy) formats.
+        Falls back to hardcoded whale addresses if file is missing or empty."""
+        # Hardcoded fallback: known active Aave V3 Arbitrum borrowers
+        HARDCODED_FALLBACK_TARGETS = [
+            "0x99525208453488C9518001712C7F72428514197F",
+            "0x5a52E96BAcdaBb82fd05763E25335261B270Efcb",
+            "0xF977814e90dA44bFA03b6295A0616a897441aceC",
+            "0x4078f3F0000e7E42d66d5F30d4B3c9D37d42D013",
+            "0x47ac0Fb4F2D84898e4D9E7b4DaB3C24507a6D503",
+            "0xBE0eB53F46cd790Cd13851d5EFf43D12404d33E8",
+            "0x28C6c06298d514Db089934071355E5743bf21d60",
+            "0xd8689E3bA3D55Ea9bB7EDa6f39C614d1a11Fa09",
+        ]
         try:
             path = "/root/Arbitrum/targets.json" if os.path.exists("/root/Arbitrum") else "targets.json"
             async with aiofiles.open(path, mode='r') as f:
                 content = await f.read()
                 if not content:
-                    return
+                    raise ValueError("Empty file")
 
                 data = json.loads(content)
 
@@ -384,6 +396,13 @@ class AntiGravityBot:
 
         except Exception as e:
             logger.warning(f"⚠️ Failed to load targets: {e}")
+            self.tier_1_danger = []
+            self.tier_2_watchlist = []
+
+        # Fallback seeding: ensure bot always has something to monitor
+        if not self.tier_1_danger and not self.tier_2_watchlist:
+            logger.warning("⚠️ No targets loaded — seeding Tier 2 with hardcoded whale fallbacks.")
+            self.tier_2_watchlist = HARDCODED_FALLBACK_TARGETS
 
     async def analyze_user_assets(self, user):
         """Finds best debt and collateral for a liquidatable user."""

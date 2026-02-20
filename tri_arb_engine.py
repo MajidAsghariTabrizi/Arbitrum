@@ -749,13 +749,7 @@ async def perform_multicall(multicall_contract, calls_list: List[Tuple[str, byte
         
     chunks = [calls_list[i : i + MULTICALL_CHUNK_SIZE] for i in range(0, len(calls_list), MULTICALL_CHUNK_SIZE)]
     tasks = [multicall_contract.functions.tryAggregate(False, chunk).call({'gas': 300_000_000}) for chunk in chunks]
-    chunk_results = []
-    # We will split the tasks list itself into smaller chunks so we gather a few at a time
-    task_chunks = [tasks[x:x+MULTICALL_CHUNK_SIZE] for x in range(0, len(tasks), MULTICALL_CHUNK_SIZE)]
-    for t_chunk in task_chunks:
-        res = await asyncio.gather(*t_chunk, return_exceptions=True)
-        chunk_results.extend(res)
-        await asyncio.sleep(0.15)  # Tiny delay to bypass free-tier firewalls
+    chunk_results = await asyncio.gather(*tasks, return_exceptions=True)
     return [item for sublist in chunk_results for item in sublist]
 
 
