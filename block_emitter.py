@@ -29,17 +29,24 @@ async def main():
     socket.bind(ZMQ_ADDR)
     logger.info(f"🔗 Bound ZeroMQ PUB on {ZMQ_ADDR}")
 
-    # 2. Web3 Setup
+    # 2. Web3 Setup & State Tracking
     w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(PRIMARY_RPC))
-    connected = await w3.is_connected()
-    if not connected:
-        logger.error(f"❌ Failed to connect to RPC: {PRIMARY_RPC}")
-        return
-    logger.info(f"🟢 Connected to RPC: {PRIMARY_RPC}")
-
-    # 3. State Tracking
-    last_block = await w3.eth.block_number
-    logger.info(f"🧱 Starting from block: {last_block}")
+    
+    while True:
+        try:
+            connected = await w3.is_connected()
+            if not connected:
+                logger.error(f"❌ Failed to connect to RPC: {PRIMARY_RPC}")
+                await asyncio.sleep(5)
+                continue
+            
+            last_block = await w3.eth.block_number
+            logger.info(f"🟢 Connected to RPC: {PRIMARY_RPC}")
+            logger.info(f"🧱 Starting from block: {last_block}")
+            break
+        except Exception as e:
+            logger.warning(f"RPC busy on startup, retrying... ({e})")
+            await asyncio.sleep(5)
 
     # 4. Main Polling Loop
     while True:
@@ -57,6 +64,7 @@ async def main():
         except Exception as e:
             logger.error(f"⚠️ Polling Error: {e}")
             await asyncio.sleep(2)  # Cooldown on network drop
+            continue
 
 if __name__ == "__main__":
     try:
