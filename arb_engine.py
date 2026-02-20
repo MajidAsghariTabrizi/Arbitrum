@@ -470,7 +470,7 @@ SCAN_COOLDOWN_SECONDS = 2.0       # Strict 2.0s rate-limit delay
 MAX_SLIPPAGE_BPS = 50             # 0.5% max slippage for trade sizing
 SAFETY_MARGIN_MULTIPLIER = 1.5    # Extra margin on cost estimates to avoid NotProfitable
 LEG_A_SLIPPAGE_BPS = 50           # 0.5% slippage tolerance on Leg A output
-MULTICALL_CHUNK_SIZE = 15        # Larger chunks = fewer HTTP requests = faster scans
+MULTICALL_CHUNK_SIZE = 1        # Larger chunks = fewer HTTP requests = faster scans
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ROUTE CONFIDENCE — Tracks simulation failures per route
@@ -1035,15 +1035,15 @@ async def scan_and_execute(rpc_manager: SmartAsyncRPCManager, current_block: int
         # Split into chunks of 15
         chunks = [leg_a_calls[i : i + MULTICALL_CHUNK_SIZE] for i in range(0, len(leg_a_calls), MULTICALL_CHUNK_SIZE)]
         
-        # Create concurrent tasks for each chunk
-        tasks = []
+        # Execute sequentially with 'Breathe' delay
+        chunk_results = []
         for chunk in chunks:
-            tasks.append(
-                multicall.functions.tryAggregate(False, chunk).call({'gas': 100000000})
-            )
-            
-        # Execute ALL tasks concurrently - the RPCs can handle this now
-        chunk_results = await asyncio.gather(*tasks, return_exceptions=True)
+            try:
+                res = await multicall.functions.tryAggregate(False, chunk).call({'gas': 50_000_000, 'gasPrice': 0})
+                chunk_results.append(res)
+            except Exception as e:
+                chunk_results.append(e)
+            await asyncio.sleep(0.05)
         
         # Flatten results (safely skip failed chunks)
         leg_a_results = []
@@ -1134,15 +1134,15 @@ async def scan_and_execute(rpc_manager: SmartAsyncRPCManager, current_block: int
         # Split into chunks
         chunks_b = [leg_b_calls[i : i + MULTICALL_CHUNK_SIZE] for i in range(0, len(leg_b_calls), MULTICALL_CHUNK_SIZE)]
         
-        # Concurrent execution
-        tasks_b = []
+        # Execute sequentially with 'Breathe' delay
+        chunk_results_b = []
         for chunk in chunks_b:
-            tasks_b.append(
-                multicall.functions.tryAggregate(False, chunk).call({'gas': 100000000})
-            )
-            
-        # Execute ALL tasks concurrently - the RPCs can handle this now
-        chunk_results_b = await asyncio.gather(*tasks_b, return_exceptions=True)
+            try:
+                res = await multicall.functions.tryAggregate(False, chunk).call({'gas': 50_000_000, 'gasPrice': 0})
+                chunk_results_b.append(res)
+            except Exception as e:
+                chunk_results_b.append(e)
+            await asyncio.sleep(0.05)
         
         # Flatten (safely skip failed chunks)
         leg_b_results = []

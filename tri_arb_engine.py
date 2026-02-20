@@ -436,7 +436,7 @@ MIN_PROFIT_USD = 0.50
 SCAN_COOLDOWN_SECONDS = 2.0       # Strict 2.0s rate-limit delay
 LEG_A_SLIPPAGE_BPS = 50           # 0.5% max slippage allowed for tri-arb routes
 SAFETY_MARGIN_MULTIPLIER = 1.5
-MULTICALL_CHUNK_SIZE = 15        # Larger chunks = fewer HTTP requests = faster scans
+MULTICALL_CHUNK_SIZE = 1        # Larger chunks = fewer HTTP requests = faster scans
 
 # Route Failure Handling
 MAX_ROUTE_FAILURES = 3
@@ -752,8 +752,16 @@ async def perform_multicall(multicall_contract, calls_list: List[Tuple[str, byte
         return []
         
     chunks = [calls_list[i : i + MULTICALL_CHUNK_SIZE] for i in range(0, len(calls_list), MULTICALL_CHUNK_SIZE)]
-    tasks = [multicall_contract.functions.tryAggregate(False, chunk).call({'gas': 300_000_000}) for chunk in chunks]
-    chunk_results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    chunk_results = []
+    for chunk in chunks:
+        try:
+            res = await multicall_contract.functions.tryAggregate(False, chunk).call({'gas': 50_000_000, 'gasPrice': 0})
+            chunk_results.append(res)
+        except Exception as e:
+            chunk_results.append(e)
+        await asyncio.sleep(0.05)
+        
     flat = []
     for sublist in chunk_results:
         if isinstance(sublist, Exception):
