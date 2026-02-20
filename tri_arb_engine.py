@@ -982,7 +982,7 @@ async def main():
 
             send_telegram_alert(
                 f"🔄 <b>Tri-Arb Engine Started</b>\n"
-                f"🔗 RPC: <code>{rpc_manager.endpoints[0][:40]}...</code>"
+                f"🔗 RPC: <code>{rpc_manager.premium_url[:40]}...</code>"
             )
 
             last_block = 0
