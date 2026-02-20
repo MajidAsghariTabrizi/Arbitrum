@@ -997,7 +997,7 @@ async def main():
                 await rpc_manager.handle_rate_limit(w3)
             else:
                 logger.error(f"💥 Fatal Startup Error: {e}")
-                await asyncio.sleep(15)
+                await asyncio.sleep(20)
 
     db_manager.init_db()
 
@@ -1020,7 +1020,7 @@ async def main():
             if not await sentinel.should_scan():
                 continue
 
-            await asyncio.sleep(random.uniform(0.5, 3.0))
+            await asyncio.sleep(random.uniform(0.5, 4.0))
 
             scan_start = time.time()
 

@@ -1264,7 +1264,7 @@ async def main():
                 await rpc_manager.handle_rate_limit(w3)
             else:
                 logger.error(f"💥 Fatal Startup Error: {e}")
-                await asyncio.sleep(15)
+                await asyncio.sleep(20)
 
     # ── Scanning Loop (ZMQ SUB) ──
     sentinel = MarketSentinel()
@@ -1288,7 +1288,7 @@ async def main():
                 continue
 
             # Jitter to avoid thundering herd across all bots
-            await asyncio.sleep(random.uniform(0.5, 3.0))
+            await asyncio.sleep(random.uniform(0.5, 4.0))
 
             scan_start = time.time()
             

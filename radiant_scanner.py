@@ -409,7 +409,7 @@ def scan_debt_tokens():
                                 all_users.add(addr2)
 
                     chunk_start = chunk_end + 1
-                    time.sleep(2.0)
+                    time.sleep(3.0)
 
                 except Exception as e:
                     # Failure: Halve the chunk size dynamically

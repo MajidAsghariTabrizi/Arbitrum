@@ -60,7 +60,7 @@ if not PRIVATE_KEY or not LIQUIDATOR_ADDRESS:
     exit(1)
 
 # Polling Config
-POLL_INTERVAL = 0.1          # 100ms — check for new blocks rapidly
+POLL_INTERVAL = 1.0          # 1.0s — relaxed polling
 SCOUT_INTERVAL = 10          # Scout (Tier 2) runs every N blocks
 
 # Tier Thresholds (must match scanner.py)
@@ -798,7 +798,7 @@ class AntiGravityBot:
                     await self.rpc.handle_rate_limit()
                 else:
                     logger.error(f"💥 Fatal Startup Error: {e}")
-                    await asyncio.sleep(15)
+                    await asyncio.sleep(20)
         logger.info(f"📊 Initial targets: Tier 1: {len(self.tier_1_danger)} | Tier 2: {len(self.tier_2_watchlist)}")
 
         # ============================================================
@@ -825,7 +825,7 @@ class AntiGravityBot:
                 if not await sentinel.should_scan():
                     continue
 
-                await asyncio.sleep(random.uniform(0.5, 3.0))
+                await asyncio.sleep(random.uniform(0.5, 4.0))
                 
                 # New block(s) detected — process the latest one
                 self.last_processed_block = current_block

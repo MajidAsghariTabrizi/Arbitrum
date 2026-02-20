@@ -26,13 +26,36 @@ class MarketSentinel:
         self.volatility_cooldown_sec = 60
 
     async def fetch_price(self) -> float:
-        """Fetches the current price of the asset from Binance API."""
+        """Fetches the current price of the asset from Binance API, using a cross-process cache."""
+        import os
+        cache_file = f".{self.symbol.lower()}_price_cache.txt"
+        current_time = time.time()
+        
+        # Check cache first
+        try:
+            if os.path.exists(cache_file):
+                with open(cache_file, "r") as f:
+                    ts, cached_price = f.read().split(",")
+                    if current_time - float(ts) < 2.0:
+                        return float(cached_price)
+        except Exception:
+            pass
+
         url = f"https://api.binance.com/api/v3/ticker/price?symbol={self.symbol}"
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=5) as response:
                     data = await response.json()
-                    return float(data.get("price", 0.0))
+                    price = float(data.get("price", 0.0))
+                    
+                    # Store in cache
+                    try:
+                        with open(cache_file, "w") as f:
+                            f.write(f"{current_time},{price}")
+                    except Exception:
+                        pass
+                        
+                    return price
         except Exception as e:
             logger.warning(f"⚠️ Sentinel failed to fetch price: {e}")
             return 0.0
