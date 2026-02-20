@@ -746,7 +746,14 @@ async def perform_multicall(multicall_contract, calls_list: List[Tuple[str, byte
         
     chunks = [calls_list[i : i + MULTICALL_CHUNK_SIZE] for i in range(0, len(calls_list), MULTICALL_CHUNK_SIZE)]
     tasks = [multicall_contract.functions.tryAggregate(False, chunk).call({'gas': 300_000_000}) for chunk in chunks]
-    chunk_results = await asyncio.gather(*tasks)
+    chunk_results = []
+    for task in tasks:
+        try:
+            res = await task
+            chunk_results.append(res)
+        except Exception as e:
+            chunk_results.append(e)
+        await asyncio.sleep(0.3)  # The Guerilla Delay
     return [item for sublist in chunk_results for item in sublist]
 
 

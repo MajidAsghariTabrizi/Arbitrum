@@ -221,7 +221,7 @@ UNDERLYING_ASSETS = {
 TRANSFER_TOPIC = Web3.to_hex(Web3.keccak(text="Transfer(address,address,uint256)"))
 
 TOTAL_BLOCKS_TO_SCAN = 10000 # Polling Config
-CHUNK_SIZE = 500
+CHUNK_SIZE = 100
 SCAN_INTERVAL = 43200
 MULTICALL_BATCH_SIZE = 150
 TIER_1_MAX_HF = 1.050
@@ -379,7 +379,7 @@ def scan_debt_tokens():
             print(f"\n🔍 Scanning {name} [{address}]...")
             
             chunk_start = start_block
-            current_chunk_size = 500  # Start moderately
+            current_chunk_size = 100  # Start moderately
 
             while chunk_start < current_block:
                 chunk_end = min(chunk_start + current_chunk_size - 1, current_block)
@@ -395,8 +395,10 @@ def scan_debt_tokens():
                         'topics': [TRANSFER_TOPIC]
                     })
                     
-                    # Success: Slightly increase chunk size for speed and move forward
-                    current_chunk_size = min(2000, current_chunk_size + 100)
+                    time.sleep(15.0)  # Extreme throttling per chunk
+
+                    # Success: Slightly increase chunk size for speed but keep it capped
+                    current_chunk_size = min(500, current_chunk_size + 50)
                     
                     for log in logs:
                         if len(log['topics']) >= 3:
@@ -415,7 +417,7 @@ def scan_debt_tokens():
                     # Failure: Halve the chunk size dynamically
                     print(f"\n   ⚠️ Chunk {chunk_start}-{chunk_end} Failed: {e}. Adapting chunk size...")
                     current_chunk_size = max(50, current_chunk_size // 2)
-                    time.sleep(300) # 5 min breath before retry on 429
+                    time.sleep(120) # 2 min breath before retry on 429
 
         except Exception as e:
             print(f"\n   ❌ Error scanning {name}: {e}")

@@ -1024,7 +1024,14 @@ async def scan_and_execute(rpc_manager: SmartAsyncRPCManager, current_block: int
             )
             
         # Fire all chunks
-        chunk_results = await asyncio.gather(*tasks)
+        chunk_results = []
+        for task in tasks:
+            try:
+                res = await task
+                chunk_results.append(res)
+            except Exception as e:
+                chunk_results.append(e)
+            await asyncio.sleep(0.3)  # The Guerilla Delay
         
         # Flatten results
         leg_a_results = [item for sublist in chunk_results for item in sublist]
@@ -1117,7 +1124,14 @@ async def scan_and_execute(rpc_manager: SmartAsyncRPCManager, current_block: int
                 multicall.functions.tryAggregate(False, chunk).call({'gas': 50_000_000})
             )
             
-        chunk_results_b = await asyncio.gather(*tasks_b)
+        chunk_results_b = []
+        for task in tasks_b:
+            try:
+                res = await task
+                chunk_results_b.append(res)
+            except Exception as e:
+                chunk_results_b.append(e)
+            await asyncio.sleep(0.3)  # The Guerilla Delay
         
         # Flatten
         leg_b_results = [item for sublist in chunk_results_b for item in sublist]
