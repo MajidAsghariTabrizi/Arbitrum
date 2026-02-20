@@ -86,8 +86,9 @@ module.exports = {
         // ── Streamlit Dashboard (optional) ──────────────────────────
         {
             name: "dashboard",
-            script: "dashboard.py",
-            interpreter: "python3",
+            script: "streamlit",
+            args: "run dashboard.py",
+            interpreter: "none",
             cwd: "/root/Arbitrum",
             autorestart: true,
             watch: false,
