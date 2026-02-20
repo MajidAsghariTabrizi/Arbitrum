@@ -1028,7 +1028,7 @@ async def scan_and_execute(rpc_manager: SmartAsyncRPCManager, current_block: int
 
     except Exception as e:
         logger.error(f"❌ Leg A Multicall failed: {e}")
-        await rpc_manager.handle_rate_limit()
+        await rpc_manager.handle_rate_limit(w3)
         return 0
 
     # Decode Leg A results

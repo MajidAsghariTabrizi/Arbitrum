@@ -248,7 +248,7 @@ def send_telegram_alert(msg, is_error=False):
         pass
 
 def build_token_map():
-    data_provider = rpc_manager.w3.eth.contract(address=DATA_PROVIDER_ADDRESS, abi=DATA_PROVIDER_ABI)
+    data_provider = rpc_manager.premium_w3.eth.contract(address=DATA_PROVIDER_ADDRESS, abi=DATA_PROVIDER_ABI)
     token_map = {}
     for name, underlying in UNDERLYING_ASSETS.items():
         try:
@@ -277,7 +277,7 @@ def save_targets_atomic(targets_data):
     os.replace(temp_path, target_path)
 
 def classify_targets_multicall(all_users_list):
-    w3 = rpc_manager.w3
+    w3 = rpc_manager.premium_w3
     
     # 1. Fetch dynamic pool address first
     addresses_provider = w3.eth.contract(address=POOL_ADDRESSES_PROVIDER, abi=ADDRESSES_PROVIDER_ABI)

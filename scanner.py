@@ -263,7 +263,7 @@ def send_telegram_alert(msg, is_error=False):
 
 def build_token_map():
     """Dynamically fetches Variable Debt Token addresses from Aave V3 PoolDataProvider."""
-    data_provider = rpc_manager.w3.eth.contract(
+    data_provider = rpc_manager.premium_w3.eth.contract(
         address=DATA_PROVIDER_ADDRESS,
         abi=DATA_PROVIDER_ABI
     )
@@ -319,7 +319,7 @@ def classify_targets_multicall(all_users_list):
     Returns:
         dict: {"tier_1_danger": [...], "tier_2_watchlist": [...]}
     """
-    w3 = rpc_manager.w3
+    w3 = rpc_manager.premium_w3
     pool = w3.eth.contract(address=POOL_ADDRESS, abi=POOL_ABI)
     multicall_contract = w3.eth.contract(address=MULTICALL3_ADDRESS, abi=MULTICALL3_ABI)
 
