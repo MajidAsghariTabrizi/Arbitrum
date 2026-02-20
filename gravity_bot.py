@@ -12,6 +12,7 @@ from decimal import Decimal
 import aiofiles
 import requests
 from web3 import AsyncWeb3
+from market_sentinel import MarketSentinel
 from dotenv import load_dotenv
 from eth_abi import decode
 
@@ -791,14 +792,21 @@ class AntiGravityBot:
         # - Consumes blocks via robust HTTP polling
         # - Handles RPC failures with reconnect logic (429 + 403)
         # ============================================================
+        sentinel = MarketSentinel()
+
         while True:
             try:
+                if not await sentinel.should_scan():
+                    await asyncio.sleep(1)
+                    continue
+
                 current_block = await self.w3.eth.block_number
                 
                 if current_block > self.last_processed_block:
                     # New block(s) detected — process the latest one
                     self.last_processed_block = current_block
                     await self.process_block(current_block)
+                    sentinel.update_last_price()
                 else:
                     await asyncio.sleep(POLL_INTERVAL)
 

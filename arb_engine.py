@@ -23,6 +23,7 @@ import logging
 import time
 import traceback
 from decimal import Decimal
+from market_sentinel import MarketSentinel
 from itertools import permutations
 from typing import Dict, List, Optional, Tuple
 
@@ -1174,8 +1175,14 @@ async def main():
     logger.info(f"📈 ETH Price: ${eth_price_usd:,.0f}")
 
     # ── Scanning Loop ──
+    sentinel = MarketSentinel()
+
     while True:
         try:
+            if not await sentinel.should_scan():
+                await asyncio.sleep(1)
+                continue
+
             current_block = await w3.eth.block_number
             
             if current_block <= last_block:
@@ -1203,6 +1210,8 @@ async def main():
                 f"{scan_duration*1000:.0f}ms | "
                 f"Δ{blocks_jumped} blocks"
             )
+
+            sentinel.update_last_price()
 
             # Strict throttle for 15 RPS limit
             await asyncio.sleep(SCAN_COOLDOWN_SECONDS)

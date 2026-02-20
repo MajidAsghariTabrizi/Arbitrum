@@ -12,6 +12,7 @@ from decimal import Decimal
 import aiofiles
 import requests
 from web3 import AsyncWeb3
+from market_sentinel import MarketSentinel
 from dotenv import load_dotenv
 from eth_abi import decode
 
@@ -794,13 +795,20 @@ class RadiantBot:
         await self.load_targets_async()
         logger.info(f"📊 Initial targets: Tier 1: {len(self.tier_1_danger)} | Tier 2: {len(self.tier_2_watchlist)}")
 
+        sentinel = MarketSentinel()
+
         while True:
             try:
+                if not await sentinel.should_scan():
+                    await asyncio.sleep(1)
+                    continue
+
                 current_block = await self.w3.eth.block_number
                 
                 if current_block > self.last_processed_block:
                     self.last_processed_block = current_block
                     await self.process_block(current_block)
+                    sentinel.update_last_price()
                 else:
                     await asyncio.sleep(POLL_INTERVAL)
 
