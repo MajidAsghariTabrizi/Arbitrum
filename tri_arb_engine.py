@@ -707,7 +707,7 @@ async def get_eth_price(rpc_manager: StickyAsyncRPCManager) -> float:
             w3 = await rpc_manager.get_w3()
             multicall = w3.eth.contract(address=w3.to_checksum_address(MULTICALL3_ADDRESS), abi=MULTICALL3_ABI)
             target, data = _encode_quoter_call(w3, UNI_V3_QUOTER, TOKENS["WETH"]["address"], USDC_ADDRESS, 10**18, 500, DEXES["Uniswap_V3"])
-            result = await multicall.functions.tryAggregate(False, [(target, data)]).call({'gas': 300_000_000})
+            result = await multicall.functions.tryAggregate(False, [(target, data)]).call()
             success, ret_bytes = result[0]
             if success:
                 quote = _decode_quoter_result(ret_bytes, "v3")
@@ -731,7 +731,7 @@ async def perform_multicall(multicall_contract, calls_list: List[Tuple[str, byte
     chunk_results = []
     for chunk in chunks:
         try:
-            res = await multicall_contract.functions.tryAggregate(False, chunk).call({'gas': 50_000_000, 'gasPrice': 0})
+            res = await multicall_contract.functions.tryAggregate(False, chunk).call()
             chunk_results.append(res)
         except Exception as e:
             chunk_results.append(e)

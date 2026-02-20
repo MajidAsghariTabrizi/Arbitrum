@@ -456,7 +456,7 @@ route_blacklist: Dict[str, float] = {}  # "TOKEN/dex_a/dex_b" -> blacklist times
 # ═══════════════════════════════════════════════════════════════════════════════
 
 async def get_v3_quote_robust(
-    rpc_manager: SmartAsyncRPCManager,
+    rpc_manager: StickyAsyncRPCManager,
     semaphore: asyncio.Semaphore,
     quoter_address: str,
     token_in: str,
@@ -498,7 +498,7 @@ async def get_v3_quote_robust(
 
 
 async def get_algebra_quote_robust(
-    rpc_manager: SmartAsyncRPCManager,
+    rpc_manager: StickyAsyncRPCManager,
     semaphore: asyncio.Semaphore,
     quoter_address: str,
     token_in: str,
@@ -933,7 +933,7 @@ async def get_eth_price(rpc_manager: StickyAsyncRPCManager) -> float:
                 10**18, 500, DEXES["Uniswap_V3"] # Pass the full DEX config
             )
             
-            result = await multicall.functions.tryAggregate(False, [(target, data)]).call({'gas': 10_000_000})
+            result = await multicall.functions.tryAggregate(False, [(target, data)]).call()
             success, ret_bytes = result[0]
             
             if success:
@@ -1009,7 +1009,7 @@ async def scan_and_execute(rpc_manager: StickyAsyncRPCManager, current_block: in
         chunk_results = []
         for chunk in chunks:
             try:
-                res = await multicall.functions.tryAggregate(False, chunk).call({'gas': 50_000_000, 'gasPrice': 0})
+                res = await multicall.functions.tryAggregate(False, chunk).call()
                 chunk_results.append(res)
             except Exception as e:
                 chunk_results.append(e)
@@ -1108,7 +1108,7 @@ async def scan_and_execute(rpc_manager: StickyAsyncRPCManager, current_block: in
         chunk_results_b = []
         for chunk in chunks_b:
             try:
-                res = await multicall.functions.tryAggregate(False, chunk).call({'gas': 50_000_000, 'gasPrice': 0})
+                res = await multicall.functions.tryAggregate(False, chunk).call()
                 chunk_results_b.append(res)
             except Exception as e:
                 chunk_results_b.append(e)
