@@ -22,6 +22,8 @@ import json
 import logging
 import time
 import random
+import zmq
+import zmq.asyncio
 import traceback
 from decimal import Decimal
 from market_sentinel import MarketSentinel
@@ -176,6 +178,7 @@ class AsyncRPCManager:
     async def connect(self):
         """Connect to the current RPC endpoint. Closes any existing session first."""
         # Gracefully close the previous aiohttp session
+        # Gracefully close the previous aiohttp session to prevent memory leaks
         if self.w3 and hasattr(self.w3.provider, '_request_kwargs'):
             try:
                 session = await self.w3.provider.cache_async_session(None)
@@ -199,17 +202,17 @@ class AsyncRPCManager:
         logger.info(f"🟢 Connected to RPC [{self.current_index + 1}/{len(self.endpoints)}]")
 
     async def handle_rate_limit(self):
-        """Handle 429/403 errors with adaptive backoff and failover."""
+        """Handle 429/403 errors with exponential backoff and failover."""
         self.strike_count += 1
-
+        
         if self.strike_count >= 3:
             self.strike_count = 0
             self.current_index = (self.current_index + 1) % len(self.endpoints)
             logger.warning(f"🔄 3 strikes! Switching to RPC [{self.current_index + 1}/{len(self.endpoints)}]")
             await self.connect()
         else:
-            cooldown = 2
-            logger.warning(f"⏳ Rate limited (Strike {self.strike_count}/3). Cooling down {cooldown}s...")
+            cooldown = min(16, (2 ** self.strike_count)) + random.uniform(0.1, 1.0)
+            logger.warning(f"⏳ Rate limited (Strike {self.strike_count}/3). Cooling down {cooldown:.2f}s...")
             await asyncio.sleep(cooldown)
 
     def is_rate_limit_error(self, error):
@@ -875,7 +878,7 @@ async def get_eth_price(rpc_manager: AsyncRPCManager) -> float:
         target, data = _encode_quoter_call(
             w3, UNI_V3_QUOTER, 
             TOKENS["WETH"]["address"], USDC_ADDRESS, 
-            10**18, 500, "v3"
+            10**18, 500, DEXES["Uniswap_V3"] # Pass the full DEX config
         )
         
         result = await multicall.functions.tryAggregate(False, [(target, data)]).call()
@@ -1175,22 +1178,29 @@ async def main():
     
     logger.info(f"📈 ETH Price: ${eth_price_usd:,.0f}")
 
-    # ── Scanning Loop ──
+    # ── Scanning Loop (ZMQ SUB) ──
     sentinel = MarketSentinel()
+
+    ctx = zmq.asyncio.Context()
+    socket = ctx.socket(zmq.SUB)
+    socket.connect("tcp://127.0.0.1:5555")
+    socket.setsockopt_string(zmq.SUBSCRIBE, "")
+    logger.info("🎧 Subscribed to ZeroMQ Block Emitter.")
 
     while True:
         try:
-            if not await sentinel.should_scan():
-                await asyncio.sleep(1)
-                continue
-
-            await asyncio.sleep(random.uniform(0.1, 0.8))
-
-            current_block = await w3.eth.block_number
+            # Wait for Emitter to broadcast a new block
+            block_msg = await socket.recv_string()
+            current_block = int(block_msg)
             
             if current_block <= last_block:
-                await asyncio.sleep(SCAN_COOLDOWN_SECONDS)
                 continue
+
+            if not await sentinel.should_scan():
+                continue
+
+            # Jitter to avoid thundering herd across all bots
+            await asyncio.sleep(random.uniform(0.1, 0.5))
 
             scan_start = time.time()
             

@@ -14,6 +14,8 @@ import aiofiles
 import requests
 from web3 import AsyncWeb3
 from market_sentinel import MarketSentinel
+import zmq
+import zmq.asyncio
 from dotenv import load_dotenv
 from eth_abi import decode
 
@@ -212,8 +214,8 @@ class AsyncRPCManager:
             logger.warning(f"🔄 3 strikes! Switching to RPC [{self.current_index + 1}/{len(self.endpoints)}]")
             await self.connect()
         else:
-            cooldown = 30
-            logger.warning(f"⏳ Rate limited (Strike {self.strike_count}/3). Cooling down {cooldown}s...")
+            cooldown = min(16, (2 ** self.strike_count)) + random.uniform(0.1, 1.0)
+            logger.warning(f"⏳ Rate limited (Strike {self.strike_count}/3). Cooling down {cooldown:.2f}s...")
             await asyncio.sleep(cooldown)
 
     def is_rate_limit_error(self, error):
@@ -789,29 +791,35 @@ class AntiGravityBot:
         logger.info(f"📊 Initial targets: Tier 1: {len(self.tier_1_danger)} | Tier 2: {len(self.tier_2_watchlist)}")
 
         # ============================================================
-        # HTTP POLLING LOOP
-        # - Consumes blocks via robust HTTP polling
+        # ZeroMQ SUB LOOP
+        # - Consumes blocks broadcasted by block_emitter.py
         # - Handles RPC failures with reconnect logic (429 + 403)
         # ============================================================
         sentinel = MarketSentinel()
 
+        ctx = zmq.asyncio.Context()
+        socket = ctx.socket(zmq.SUB)
+        socket.connect("tcp://127.0.0.1:5555")
+        socket.setsockopt_string(zmq.SUBSCRIBE, "")
+        logger.info("🎧 Subscribed to ZeroMQ Block Emitter.")
+
         while True:
             try:
-                if not await sentinel.should_scan():
-                    await asyncio.sleep(1)
+                block_msg = await socket.recv_string()
+                current_block = int(block_msg)
+
+                if current_block <= self.last_processed_block:
                     continue
 
-                await asyncio.sleep(random.uniform(0.1, 0.8))
+                if not await sentinel.should_scan():
+                    continue
 
-                current_block = await self.w3.eth.block_number
+                await asyncio.sleep(random.uniform(0.1, 0.5))
                 
-                if current_block > self.last_processed_block:
-                    # New block(s) detected — process the latest one
-                    self.last_processed_block = current_block
-                    await self.process_block(current_block)
-                    sentinel.update_last_price()
-                else:
-                    await asyncio.sleep(POLL_INTERVAL)
+                # New block(s) detected — process the latest one
+                self.last_processed_block = current_block
+                await self.process_block(current_block)
+                sentinel.update_last_price()
 
             except Exception as e:
                 if self.rpc.is_rate_limit_error(e):

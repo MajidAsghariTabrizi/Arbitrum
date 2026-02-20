@@ -67,8 +67,9 @@ class SyncRPCManager:
             send_telegram_alert(msg, is_error=True)
             return True
         else:
-            print("❌ All Fallbacks exhausted. Sleeping 30s then Resetting to Primary.")
-            time.sleep(30)  # Exhaustion Cooldown
+            backoff = min(120, 2 ** self.consecutive_errors)
+            print(f"❌ All Fallbacks exhausted. Sleeping {backoff}s before Resetting to Primary.")
+            time.sleep(backoff)
 
             self.active_rpc_index = -1
             self.w3 = Web3(Web3.HTTPProvider(self.primary_rpc, request_kwargs={'timeout': 60}))
@@ -90,8 +91,9 @@ class SyncRPCManager:
             # Adaptive Backoff for Rate Limits (handles 429 AND 403)
             if "429" in error_str or "403" in error_str or "too many requests" in error_str or "forbidden" in error_str:
                 self.consecutive_errors += 1
-                print(f"⚠️ Rate Limit Hit (Strike {self.consecutive_errors}/3). CAUTION: Cooling down for 30s...")
-                time.sleep(30)
+                backoff = min(120, 2 ** self.consecutive_errors)
+                print(f"⚠️ Rate Limit Hit (Strike {self.consecutive_errors}/3). CAUTION: Cooling down for {backoff}s...")
+                time.sleep(backoff)
 
                 # Adaptive Penalty
                 if self.active_rpc_index == -1:
@@ -402,50 +404,44 @@ def scan_debt_tokens():
         try:
             print(f"\n🔍 Scanning {name} [{address}]...")
 
-            for chunk_start in range(start_block, current_block, CHUNK_SIZE):
-                chunk_end = min(chunk_start + CHUNK_SIZE - 1, current_block)
+            chunk_start = start_block
+            current_chunk_size = 500  # Start moderately
+
+            while chunk_start < current_block:
+                chunk_end = min(chunk_start + current_chunk_size - 1, current_block)
 
                 # Show progress
-                print(f"   ⏳ Block: {chunk_start}-{chunk_end} | Found: {len(all_users)}", end="\r")
+                print(f"   ⏳ Block: {chunk_start}-{chunk_end} (Size: {chunk_end - chunk_start + 1}) | Found: {len(all_users)}", end="\r")
 
-                # Retry Logic for Stability handled by rpc_manager.call
                 try:
-                    # ============================================================
-                    # BULLETPROOF HEX CASTING — fixes "hex string without 0x prefix"
-                    # Public RPC nodes (Chainstack, Ankr) require strict hex block numbers.
-                    # hex(int(n)) produces '0x...' which is the correct format.
-                    # ============================================================
                     logs = rpc_manager.call(w3.eth.get_logs, {
                         'fromBlock': hex(int(chunk_start)),
                         'toBlock': hex(int(chunk_end)),
                         'address': Web3.to_checksum_address(address),
                         'topics': [TRANSFER_TOPIC]
                     })
+                    
+                    # Success: Slightly increase chunk size for speed and move forward
+                    current_chunk_size = min(2000, current_chunk_size + 100)
+                    
+                    for log in logs:
+                        if len(log['topics']) >= 3:
+                            addr1 = Web3.to_checksum_address("0x" + log['topics'][1].hex()[-40:])
+                            addr2 = Web3.to_checksum_address("0x" + log['topics'][2].hex()[-40:])
+
+                            if addr1 != "0x0000000000000000000000000000000000000000":
+                                all_users.add(addr1)
+                            if addr2 != "0x0000000000000000000000000000000000000000":
+                                all_users.add(addr2)
+
+                    chunk_start = chunk_end + 1
+                    time.sleep(0.5)
+
                 except Exception as e:
-                    # If failed after retries/failover, skip chunk
-                    print(f"\n   ⚠️ Chunk {chunk_start}-{chunk_end} Skipped: {e}")
-                    logs = []
-
-                for log in logs:
-                    if len(log['topics']) >= 3:
-                        # Topic 1 is 'from', Topic 2 is 'to'
-                        # In Debt tokens:
-                        # - mint (borrow): from=0x0, to=User
-                        # - burn (repay): from=User, to=0x0
-                        addr1 = Web3.to_checksum_address("0x" + log['topics'][1].hex()[-40:])
-                        addr2 = Web3.to_checksum_address("0x" + log['topics'][2].hex()[-40:])
-
-                        # Filter out the zero address (mint/burn origin)
-                        if addr1 != "0x0000000000000000000000000000000000000000":
-                            all_users.add(addr1)
-                        if addr2 != "0x0000000000000000000000000000000000000000":
-                            all_users.add(addr2)
-
-                # ============================================================
-                # HARD THROTTLE — 1.0s cooldown after every single chunk
-                # Public nodes reject rapid-fire eth_getLogs requests.
-                # ============================================================
-                time.sleep(1.0)
+                    # Failure: Halve the chunk size dynamically
+                    print(f"\n   ⚠️ Chunk {chunk_start}-{chunk_end} Failed: {e}. Adapting chunk size...")
+                    current_chunk_size = max(50, current_chunk_size // 2)
+                    time.sleep(2) # Breath before retry
 
         except Exception as e:
             print(f"\n   ❌ Error scanning {name}: {e}")

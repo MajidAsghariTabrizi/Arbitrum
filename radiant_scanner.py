@@ -56,8 +56,9 @@ class SyncRPCManager:
             send_telegram_alert(msg, is_error=True)
             return True
         else:
-            print("❌ All Fallbacks exhausted. Sleeping 30s then Resetting to Primary.")
-            time.sleep(30)
+            backoff = min(120, 2 ** self.consecutive_errors)
+            print(f"❌ All Fallbacks exhausted. Sleeping {backoff}s before Resetting to Primary.")
+            time.sleep(backoff)
             self.active_rpc_index = -1
             self.w3 = Web3(Web3.HTTPProvider(self.primary_rpc, request_kwargs={'timeout': 60}))
             self.rpc_delay = 0.1
@@ -72,12 +73,16 @@ class SyncRPCManager:
             return func(*args, **kwargs)
         except Exception as e:
             error_str = str(e).lower()
+            # Adaptive Backoff for Rate Limits (handles 429 AND 403)
             if "429" in error_str or "403" in error_str or "too many requests" in error_str or "forbidden" in error_str:
                 self.consecutive_errors += 1
-                print(f"⚠️ Rate Limit Hit (Strike {self.consecutive_errors}/3). CAUTION: Cooling down for 30s...")
-                time.sleep(30)
+                backoff = min(120, 2 ** self.consecutive_errors)
+                print(f"⚠️ Rate Limit Hit (Strike {self.consecutive_errors}/3). CAUTION: Cooling down for {backoff}s...")
+                time.sleep(backoff)
+
+                # Adaptive Penalty
                 if self.active_rpc_index == -1:
-                    self.rpc_delay += 0.1
+                    self.rpc_delay += 0.1  # More aggressive backoff
                     print(f"🐌 Increased Primary Delay to {self.rpc_delay:.2f}s")
                 if self.consecutive_errors >= 3:
                     if self.handle_failure():
@@ -301,9 +306,17 @@ def scan_debt_tokens():
 
     for name, address in token_map.items():
         try:
-            print(f"🔍 Scanning {name} [{address}]...")
-            for chunk_start in range(start_block, current_block, CHUNK_SIZE):
-                chunk_end = min(chunk_start + CHUNK_SIZE - 1, current_block)
+            print(f"\n🔍 Scanning {name} [{address}]...")
+            
+            chunk_start = start_block
+            current_chunk_size = 500  # Start moderately
+
+            while chunk_start < current_block:
+                chunk_end = min(chunk_start + current_chunk_size - 1, current_block)
+
+                # Show progress
+                print(f"   ⏳ Block: {chunk_start}-{chunk_end} (Size: {chunk_end - chunk_start + 1}) | Found: {len(all_users)}", end="\r")
+
                 try:
                     logs = rpc_manager.call(w3.eth.get_logs, {
                         'fromBlock': hex(int(chunk_start)),
@@ -311,17 +324,32 @@ def scan_debt_tokens():
                         'address': Web3.to_checksum_address(address),
                         'topics': [TRANSFER_TOPIC]
                     })
-                except Exception:
-                    logs = []
-                for log in logs:
-                    if len(log['topics']) >= 3:
-                        addr1 = Web3.to_checksum_address("0x" + log['topics'][1].hex()[-40:])
-                        addr2 = Web3.to_checksum_address("0x" + log['topics'][2].hex()[-40:])
-                        if addr1 != "0x0000000000000000000000000000000000000000": all_users.add(addr1)
-                        if addr2 != "0x0000000000000000000000000000000000000000": all_users.add(addr2)
-                time.sleep(1.0)
+                    
+                    # Success: Slightly increase chunk size for speed and move forward
+                    current_chunk_size = min(2000, current_chunk_size + 100)
+                    
+                    for log in logs:
+                        if len(log['topics']) >= 3:
+                            addr1 = Web3.to_checksum_address("0x" + log['topics'][1].hex()[-40:])
+                            addr2 = Web3.to_checksum_address("0x" + log['topics'][2].hex()[-40:])
+
+                            if addr1 != "0x0000000000000000000000000000000000000000":
+                                all_users.add(addr1)
+                            if addr2 != "0x0000000000000000000000000000000000000000":
+                                all_users.add(addr2)
+
+                    chunk_start = chunk_end + 1
+                    time.sleep(0.5)
+
+                except Exception as e:
+                    # Failure: Halve the chunk size dynamically
+                    print(f"\n   ⚠️ Chunk {chunk_start}-{chunk_end} Failed: {e}. Adapting chunk size...")
+                    current_chunk_size = max(50, current_chunk_size // 2)
+                    time.sleep(2) # Breath before retry
+
         except Exception as e:
-            print(f"Error scanning {name}: {e}")
+            print(f"\n   ❌ Error scanning {name}: {e}")
+            send_telegram_alert(f"⚠️ <b>Scanner Error</b> on <code>{name}</code>:\n<code>{e}</code>", is_error=True)
             continue
 
     if len(all_users) == 0:
