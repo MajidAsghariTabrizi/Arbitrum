@@ -186,7 +186,8 @@ class SmartAsyncRPCManager:
                            "clientconnectorerror", "oserror", "gaierror"]
 
     def __init__(self):
-        self.rpc_urls = [PRIMARY_RPC] + FALLBACK_RPCS.copy()
+        self.primary_url = PRIMARY_RPC
+        self.rpc_urls = [self.primary_url] + FALLBACK_RPCS.copy()
         self.current_index = 0
         self.active_url = self.rpc_urls[self.current_index]
         self.w3: Optional[AsyncWeb3] = None

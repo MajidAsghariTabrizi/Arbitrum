@@ -173,7 +173,8 @@ class SmartAsyncRPCManager:
                            "clientconnectorerror", "oserror", "gaierror"]
 
     def __init__(self):
-        self.rpc_urls = [SNIPER_RPC] + FALLBACK_RPCS.copy()
+        self.primary_url = SNIPER_RPC
+        self.rpc_urls = [self.primary_url] + FALLBACK_RPCS.copy()
         self.current_index = 0
         self.active_url = self.rpc_urls[self.current_index]
         self.w3 = None
