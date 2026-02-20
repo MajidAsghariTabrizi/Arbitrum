@@ -90,6 +90,9 @@ class SmartSyncRPCManager:
                 return self.free_w3s[node["url"]]
                 
         # Failsafe
+        if not is_critical:
+            raise Exception("NO_FREE_NODES")
+            
         print("⚠️ All Free Nodes blacklisted! Falling back to Premium Node temporarily.")
         return self.premium_w3
 
@@ -135,6 +138,11 @@ class SmartSyncRPCManager:
         except Exception as e:
             error_str = str(e).lower()
             
+            if "no_free_nodes" in error_str:
+                print("⏳ No Free Nodes available. Sleeping for 10s before retry...")
+                time.sleep(10)
+                return self.call(func, is_critical, *args, **kwargs)
+                
             w3_instance = self.get_optimal_w3(is_critical)
             url_failed = w3_instance.provider.endpoint_uri
 

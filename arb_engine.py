@@ -478,7 +478,7 @@ route_blacklist: Dict[str, float] = {}  # "TOKEN/dex_a/dex_b" -> blacklist times
 # ═══════════════════════════════════════════════════════════════════════════════
 
 async def get_v3_quote_robust(
-    rpc_manager: AsyncRPCManager,
+    rpc_manager: SmartAsyncRPCManager,
     semaphore: asyncio.Semaphore,
     quoter_address: str,
     token_in: str,
@@ -520,7 +520,7 @@ async def get_v3_quote_robust(
 
 
 async def get_algebra_quote_robust(
-    rpc_manager: AsyncRPCManager,
+    rpc_manager: SmartAsyncRPCManager,
     semaphore: asyncio.Semaphore,
     quoter_address: str,
     token_in: str,
