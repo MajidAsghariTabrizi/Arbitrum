@@ -225,7 +225,7 @@ TRANSFER_TOPIC = Web3.to_hex(Web3.keccak(text="Transfer(address,address,uint256)
 
 TOTAL_BLOCKS_TO_SCAN = 10000 # Polling Config
 CHUNK_SIZE = 2000
-SCAN_INTERVAL = 21600
+SCAN_INTERVAL = 43200
 MULTICALL_BATCH_SIZE = 150
 TIER_1_MAX_HF = 1.050
 TIER_2_MAX_HF = 1.200
@@ -412,7 +412,7 @@ def scan_debt_tokens():
                                 all_users.add(addr2)
 
                     chunk_start = chunk_end + 1
-                    time.sleep(5.0)
+                    time.sleep(10.0)
 
                 except Exception as e:
                     # Failure: Halve the chunk size dynamically

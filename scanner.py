@@ -222,7 +222,7 @@ TRANSFER_TOPIC = Web3.to_hex(Web3.keccak(text="Transfer(address,address,uint256)
 TOTAL_BLOCKS_TO_SCAN = 50000   # Check last ~4 hours
 CHUNK_SIZE = 2000              # Aave Configuration
 # We aim to keep scan size manageable for free RPCs
-SCAN_INTERVAL = 21600            # 6 hours between scans
+SCAN_INTERVAL = 43200            # 12 hours between scans
 TOTAL_BLOCKS_TO_SCAN = 10000    # Backwards time travel distance
 MULTICALL_BATCH_SIZE = 150     # Max addresses per Multicall3 batch
 
@@ -404,7 +404,7 @@ def scan_debt_tokens():
 
     # 1. Proactive Health Check (Auto-Recovery)
     # rpc_manager.check_primary_health() # This method doesn't exist in SmartSyncRPCManager
-    w3 = rpc_manager.w3  # Get current active instance
+    w3 = rpc_manager.premium_w3  # explicitly use premium node
 
     # Active RPC test: fetch block_number to get the EXACT error on failure
     print("═══════════════════════════════════════════════════════════")
@@ -484,7 +484,7 @@ def scan_debt_tokens():
                                 all_users.add(addr2)
 
                     chunk_start = chunk_end + 1
-                    time.sleep(5.0)
+                    time.sleep(10.0)
 
                 except Exception as e:
                     # Failure: Halve the chunk size dynamically

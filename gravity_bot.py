@@ -801,7 +801,7 @@ class AntiGravityBot:
                     await self.rpc.handle_rate_limit()
                 else:
                     logger.error(f"💥 Fatal Startup Error: {e}")
-                    await asyncio.sleep(20)
+                    await asyncio.sleep(60)
         logger.info(f"📊 Initial targets: Tier 1: {len(self.tier_1_danger)} | Tier 2: {len(self.tier_2_watchlist)}")
 
         # ============================================================
@@ -828,7 +828,7 @@ class AntiGravityBot:
                 if not await sentinel.should_scan():
                     continue
 
-                await asyncio.sleep(random.uniform(1.0, 7.0))
+                await asyncio.sleep(random.uniform(2.0, 10.0))
                 
                 # New block(s) detected — process the latest one
                 self.last_processed_block = current_block
