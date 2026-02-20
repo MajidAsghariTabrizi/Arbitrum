@@ -13,12 +13,10 @@ from eth_abi import decode
 load_dotenv()
 
 # --- RPC MANAGER (Strict QoS Lane: Tier 3 → SCANNER_RPC) ---
-class StickySyncRPCManager:
+class SmartSyncRPCManager:
     """
-    Strict QoS Sticky Sync RPC Manager:
-    - Uses a SINGLE dedicated RPC node (SCANNER_RPC) for all requests.
-    - On 429 Rate Limit: time.sleep() + retry on SAME node (no rotation).
-    - On hard connection error: failover to FALLBACK_RPCS.
+    Round-Robin Sync RPC Manager:
+    - Rotates through all available RPC nodes on rate limit / quota errors.
     """
     HARD_ERROR_KEYWORDS = ["serverdisconnected", "connectionerror", "connection refused",
                            "cannot connect", "server disconnected", "connectionreseterror",
@@ -33,56 +31,43 @@ class StickySyncRPCManager:
             print("❌ SCANNER_RPC not found in .env")
             exit()
 
-        # Single sticky connection
-        self.premium_w3 = Web3(Web3.HTTPProvider(self.primary_url, request_kwargs={'timeout': 60}))
-        self.active_url = self.primary_url
+        self.rpc_urls = [self.primary_url] + self.fallback_urls
+        self.current_index = 0
+        self.active_url = self.rpc_urls[self.current_index]
+
+        self.premium_w3 = Web3(Web3.HTTPProvider(self.active_url, request_kwargs={'timeout': 60}))
         self.on_fallback = False
         self.strike_count = 0
 
-        print(f"🟢 Sticky Sync RPC Manager (Tier 3 Scanner): {self.primary_url[:50]}...")
+        print(f"🟢 Smart Sync RPC Manager: Starting with {self.active_url[:50]}...")
 
     def get_optimal_w3(self, is_critical=False) -> Web3:
-        """Returns the single sticky Web3 instance."""
+        """Returns the current Web3 instance."""
         return self.premium_w3
 
     def handle_rate_limit(self, url_failed: str):
-        """429: Sleep with exponential backoff, retry on SAME node. No rotation."""
-        self.strike_count += 1
-        cooldown = min(120, 2.0 * self.strike_count) + random.uniform(0.1, 1.0)
-        print(f"⏳ Rate limited (Strike {self.strike_count}). Sleeping {cooldown:.1f}s on SAME node...")
+        """Immediately rotate to the next node and sleep briefly."""
+        self.current_index = (self.current_index + 1) % len(self.rpc_urls)
+        self.active_url = self.rpc_urls[self.current_index]
+        self.premium_w3 = Web3(Web3.HTTPProvider(self.active_url, request_kwargs={'timeout': 60}))
+        
+        cooldown = random.uniform(1.0, 2.0)
+        print(f"⏳ Rate limited or Quota exceeded. Rotating to {self.active_url[:50]}... (Sleep {cooldown:.1f}s)")
         time.sleep(cooldown)
 
     def handle_hard_error(self, error):
-        """Hard connection error: Failover to FALLBACK_RPCS sequentially."""
-        print(f"💥 Hard RPC error: {error}. Failing over to FALLBACK_RPCS...")
-        self.strike_count = 0
-
-        for fb_url in self.fallback_urls:
-            try:
-                fb_w3 = Web3(Web3.HTTPProvider(fb_url, request_kwargs={'timeout': 60}))
-                fb_w3.eth.block_number  # Test connection
-                self.premium_w3 = fb_w3
-                self.active_url = fb_url
-                self.on_fallback = True
-                print(f"🔄 Fallback active: {fb_url[:50]}...")
-                return
-            except Exception:
-                continue
-
-        print("❌ All FALLBACK_RPCS failed. Sleeping 10s then retrying primary...")
-        time.sleep(10)
-        self.premium_w3 = Web3(Web3.HTTPProvider(self.primary_url, request_kwargs={'timeout': 60}))
-        self.active_url = self.primary_url
-        self.on_fallback = False
+        """Hard connection error: Rotate to next node."""
+        print(f"💥 Hard RPC error: {error}. Rotating...")
+        self.handle_rate_limit(self.active_url)
 
     def is_rate_limit_error(self, error_str):
-        return any(k in error_str for k in ["429", "403", "too many requests", "forbidden", "timeout"])
+        return any(k in error_str for k in ["429", "403", "too many requests", "forbidden", "timeout", "quota", "-32001"])
 
     def is_hard_error(self, error_str):
         return any(k in error_str for k in self.HARD_ERROR_KEYWORDS)
 
     def call(self, func, is_critical=False, *args, **kwargs):
-        """Wrapper for Web3 calls with Sticky Routing & Rate Limiting."""
+        """Wrapper for Web3 calls with Smart Routing & Rate Limiting."""
         try:
             w3_instance = self.get_optimal_w3(is_critical)
             func_name = func.__name__
@@ -96,7 +81,6 @@ class StickySyncRPCManager:
 
             if self.is_rate_limit_error(error_str):
                 self.handle_rate_limit(self.active_url)
-                time.sleep(2.0 + random.uniform(0.1, 1.0))
                 return self.call(func, is_critical, *args, **kwargs)
             elif self.is_hard_error(error_str):
                 self.handle_hard_error(e)
@@ -105,7 +89,7 @@ class StickySyncRPCManager:
                 raise e
 
 
-rpc_manager = StickySyncRPCManager()
+rpc_manager = SmartSyncRPCManager()
 # w3 globally needed for utility formatting in scanner
 w3 = rpc_manager.premium_w3
 

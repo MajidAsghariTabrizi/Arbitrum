@@ -176,91 +176,47 @@ FLASHLOAN_USDC_AMOUNT = 1000 * 10**USDC_DECIMALS  # $1,000
 # STICKY ASYNC RPC MANAGER (QoS Lane: PRIMARY_RPC)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class StickyAsyncRPCManager:
+class SmartAsyncRPCManager:
     """
-    Strict QoS Sticky RPC Manager:
-    - Uses a SINGLE dedicated RPC node (PRIMARY_RPC) for all requests.
-    - On 429 Rate Limit: asyncio.sleep() + retry on the SAME node (no rotation).
-    - On hard connection error (ServerDisconnected, ConnectionError): failover to FALLBACK_RPCS.
-    - Once primary recovers, switch back.
+    Round-Robin Async RPC Manager:
+    - Rotates through all available RPC nodes on rate limit / quota errors.
     """
     HARD_ERROR_KEYWORDS = ["serverdisconnected", "connectionerror", "connection refused",
                            "cannot connect", "server disconnected", "connectionreseterror",
                            "clientconnectorerror", "oserror", "gaierror"]
 
     def __init__(self):
-        self.primary_url = PRIMARY_RPC
-        self.fallback_urls = FALLBACK_RPCS.copy()
+        self.rpc_urls = [PRIMARY_RPC] + FALLBACK_RPCS.copy()
+        self.current_index = 0
+        self.active_url = self.rpc_urls[self.current_index]
         self.w3: Optional[AsyncWeb3] = None
-        self.active_url = self.primary_url
-        self.on_fallback = False
         self.strike_count = 0
 
     async def connect(self):
-        """Connect to the dedicated RPC node."""
-        self.active_url = self.primary_url
-        self.on_fallback = False
+        """Connect to the current RPC node."""
         self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(
-            self.primary_url, request_kwargs={"timeout": 60}
+            self.active_url, request_kwargs={"timeout": 60}
         ))
-        logger.info(f"🔌 Sticky RPC (Tier 1): {self.primary_url[:50]}...")
+        logger.info(f"🔌 Smart RPC: {self.active_url[:50]}...")
 
     async def get_w3(self) -> AsyncWeb3:
-        """Returns the current sticky Web3 instance."""
+        """Returns the current Web3 instance."""
         return self.w3
 
     async def handle_rate_limit(self):
-        """
-        429 Rate Limit: Sleep with exponential backoff, retry on the SAME node.
-        Never rotates to avoid polluting other QoS lanes.
-        """
-        self.strike_count += 1
-        cooldown = min(30, 2.0 * self.strike_count) + random.uniform(0.1, 1.0)
-        logger.warning(f"⏳ Rate limited (Strike {self.strike_count}). Sleeping {cooldown:.2f}s on SAME node...")
+        """Immediately rotate to the next node and sleep briefly."""
+        self.current_index = (self.current_index + 1) % len(self.rpc_urls)
+        self.active_url = self.rpc_urls[self.current_index]
+        await self.connect()
+        
+        cooldown = random.uniform(1.0, 2.0)
+        logger.warning(f"⏳ Rate limited or Quota exceeded. Rotating to {self.active_url[:50]}... (Sleep {cooldown:.1f}s)")
         await asyncio.sleep(cooldown)
 
     async def handle_hard_error(self, error):
-        """
-        Hard connection error: Failover to FALLBACK_RPCS sequentially.
-        Periodically tries to reconnect to primary.
-        """
-        logger.error(f"💥 Hard RPC error: {error}. Failing over to FALLBACK_RPCS...")
-        self.strike_count = 0
-
-        for fb_url in self.fallback_urls:
-            try:
-                fb_w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(
-                    fb_url, request_kwargs={"timeout": 60}
-                ))
-                await asyncio.wait_for(fb_w3.eth.block_number, timeout=5.0)
-                self.w3 = fb_w3
-                self.active_url = fb_url
-                self.on_fallback = True
-                logger.warning(f"🔄 Fallback active: {fb_url[:50]}...")
-                return
-            except Exception:
-                continue
-
-        logger.error("❌ All FALLBACK_RPCS failed. Sleeping 10s then retrying primary...")
-        await asyncio.sleep(10)
-        await self.connect()
-
-    async def try_recover_primary(self):
-        """If on fallback, periodically try to switch back to primary."""
-        if not self.on_fallback:
-            return
-        try:
-            primary_w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(
-                self.primary_url, request_kwargs={"timeout": 60}
-            ))
-            await asyncio.wait_for(primary_w3.eth.block_number, timeout=5.0)
-            self.w3 = primary_w3
-            self.active_url = self.primary_url
-            self.on_fallback = False
-            self.strike_count = 0
-            logger.info(f"🟢 Primary RPC recovered: {self.primary_url[:50]}...")
-        except Exception:
-            pass
+        """Hard connection error: Rotate to next node."""
+        logger.error(f"💥 Hard RPC error: {error}. Rotating...")
+        await self.handle_rate_limit()
 
     def is_rate_limit_error(self, error):
         err_str = str(error).lower()
@@ -974,8 +930,8 @@ async def main():
     logger.info("🛸 ANTI-GRAVITY — Triangular Arbitrage Engine")
     logger.info("═══════════════════════════════════════════════════════════")
     
-    # Initialize Sticky RPC Manager (QoS: PRIMARY_RPC only)
-    rpc_manager = StickyAsyncRPCManager()
+    # Initialize Smart RPC Manager (Round-Robin)
+    rpc_manager = SmartAsyncRPCManager()
     await rpc_manager.connect()
     
     logger.info(f"📊 Scanning {len(TOKENS)} tokens via {len(HUBS)} Hubs across {len(DEXES)} DEXs")

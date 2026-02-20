@@ -175,27 +175,24 @@ ERC20_ABI = [{
 
 # --- 2. ASYNC RPC MANAGER (Enhanced: 403 support) ---
 
-class AsyncRPCManager:
+class SmartAsyncRPCManager:
     """
-    Strict QoS Sticky RPC Manager (Tier 2: SNIPER_RPC).
-    - Uses a SINGLE dedicated RPC node for all requests.
-    - On 429: sleep + retry on SAME node (no rotation).
-    - On hard connection error: failover to FALLBACK_RPCS.
+    Round-Robin Async RPC Manager (Tier 2: SNIPER_RPC).
+    - Rotates through all available RPC nodes on rate limit / quota errors.
     """
     HARD_ERROR_KEYWORDS = ["serverdisconnected", "connectionerror", "connection refused",
                            "cannot connect", "server disconnected", "connectionreseterror",
                            "clientconnectorerror", "oserror", "gaierror"]
 
     def __init__(self):
-        self.primary_url = SNIPER_RPC
-        self.fallback_urls = FALLBACK_RPCS.copy()
+        self.rpc_urls = [SNIPER_RPC] + FALLBACK_RPCS.copy()
+        self.current_index = 0
+        self.active_url = self.rpc_urls[self.current_index]
         self.w3 = None
-        self.active_url = self.primary_url
-        self.on_fallback = False
         self.strike_count = 0
 
     async def connect(self):
-        """Connect to the dedicated SNIPER_RPC node."""
+        """Connect to the current SNIPER_RPC node."""
         if self.w3 and hasattr(self.w3.provider, '_request_kwargs'):
             try:
                 session = await self.w3.provider.cache_async_session(None)
@@ -204,46 +201,28 @@ class AsyncRPCManager:
             except Exception:
                 pass
 
-        self.active_url = self.primary_url
-        self.on_fallback = False
         self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(
-            self.primary_url, request_kwargs={'timeout': 60}
+            self.active_url, request_kwargs={'timeout': 60}
         ))
-        logger.info(f"🔌 Sticky RPC (Tier 2 Sniper): {self.primary_url[:50]}...")
+        logger.info(f"🔌 Smart RPC (Tier 2 Sniper): {self.active_url[:50]}...")
 
     async def handle_rate_limit(self):
-        """429: Sleep with exponential backoff, retry on SAME node."""
-        self.strike_count += 1
-        # Soft exponential backoff for minor RPS breaches
-        cooldown = min(30, 2.0 * self.strike_count) + random.uniform(0.1, 1.0)
-        logger.warning(f"⏳ Rate limited (Strike {self.strike_count}). Sleeping {cooldown:.2f}s on SAME node...")
+        """Immediately rotate to the next node and sleep briefly."""
+        self.current_index = (self.current_index + 1) % len(self.rpc_urls)
+        self.active_url = self.rpc_urls[self.current_index]
+        await self.connect()
+        
+        cooldown = random.uniform(1.0, 2.0)
+        logger.warning(f"⏳ Rate limited or Quota exceeded. Rotating to {self.active_url[:50]}... (Sleep {cooldown:.1f}s)")
         await asyncio.sleep(cooldown)
 
     async def handle_hard_error(self, error):
-        """Hard connection error: Failover to FALLBACK_RPCS sequentially."""
-        logger.error(f"💥 Hard RPC error: {error}. Failing over to FALLBACK_RPCS...")
-        self.strike_count = 0
-
-        for fb_url in self.fallback_urls:
-            try:
-                fb_w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(
-                    fb_url, request_kwargs={'timeout': 60}
-                ))
-                connected = await fb_w3.is_connected()
-                if connected:
-                    self.w3 = fb_w3
-                    self.active_url = fb_url
-                    self.on_fallback = True
-                    logger.warning(f"🔄 Fallback active: {fb_url[:50]}...")
-                    return
-            except Exception:
-                continue
-
-        logger.error("❌ All FALLBACK_RPCS failed. Sleeping 10s then retrying primary...")
-        await asyncio.sleep(10)
-        await self.connect()
+        """Hard connection error: Rotate to next node."""
+        logger.error(f"💥 Hard RPC error: {error}. Rotating...")
+        await self.handle_rate_limit()
 
     def is_rate_limit_error(self, error):
+        """Check if an error is a rate limit / forbidden error."""
         err_str = str(error).lower()
         return any(k in err_str for k in ["429", "403", "rate", "forbidden", "quota", "too many requests", "-32001"])
 
@@ -259,7 +238,7 @@ class RadiantBot:
     """
     def __init__(self):
         # RPC Manager
-        self.rpc = AsyncRPCManager()
+        self.rpc = SmartAsyncRPCManager()
         self.account = None
 
         # Contracts
