@@ -217,7 +217,7 @@ TRANSFER_TOPIC = Web3.to_hex(Web3.keccak(text="Transfer(address,address,uint256)
 
 # SETTINGS
 TOTAL_BLOCKS_TO_SCAN = 50000   # Check last ~4 hours
-CHUNK_SIZE = 100              # Aave Configuration
+CHUNK_SIZE = 50               # Aave Configuration
 # We aim to keep scan size manageable for free RPCs
 SCAN_INTERVAL = 43200            # 12 hours between scans
 TOTAL_BLOCKS_TO_SCAN = 10000    # Backwards time travel distance
@@ -262,14 +262,15 @@ def send_telegram_alert(msg, is_error=False):
 
 
 def build_token_map():
-    """Hardcoded Variable Debt Token addresses for Aave V3 Arbitrum."""
+    # Hardcoded Aave V3 Arbitrum Variable Debt Tokens (Zero RPC Calls)
     return {
-        "USDC_Debt": "0x72a58b2A43d57dD690E261A703a74F038eFceCCa",
-        "USDC_e_Debt": "0x8b321D50E3E8b54D35123d4C19A0757758bcEE36",
-        "WETH_Debt": "0x0c84331e39d6658Cd6e6b9ba04736cC4c4734351",
-        "WBTC_Debt": "0x40aAb8dfE76bF9E013A43e0dD59BE808dD7B90f0",
-        "ARB_Debt": "0x9E306a4b16B4DffFaf3d03b0c5cb255dE0288E21",
-        "USDT_Debt": "0x8b193A17dD5634563CDeaD9B22288db70732E9D4"
+        "USDC": "0x72a58b2A43d57dD690E261A703a74F038eFceCCa",
+        "USDC_e": "0x8b321D50E3E8b54D35123d4C19A0757758bcEE36",
+        "WETH": "0x0c84331e39d6658Cd6e6b9ba04736cC4c4734351",
+        "WBTC": "0x40aAb8dfE76bF9E013A43e0dD59BE808dD7B90f0",
+        "ARB": "0x9E306a4b16B4DffFaf3d03b0c5cb255dE0288E21",
+        "USDT": "0x8b193A17dD5634563CDeaD9B22288db70732E9D4",
+        "LINK": "0x53b16A653F2a2d480B68A201630c7C38A18E6f7d"
     }
 
 
@@ -439,7 +440,7 @@ def scan_debt_tokens():
             print(f"\n🔍 Scanning {name} [{address}]...")
 
             chunk_start = start_block
-            current_chunk_size = 100  # Start moderately
+            current_chunk_size = 50  # Fixed small chunk size
 
             while chunk_start < current_block:
                 chunk_end = min(chunk_start + current_chunk_size - 1, current_block)
@@ -455,10 +456,10 @@ def scan_debt_tokens():
                         'topics': [TRANSFER_TOPIC]
                     })
                     
-                    time.sleep(15.0)  # Extreme throttling per chunk
+                    time.sleep(20.0)  # Extreme throttling per chunk
 
-                    # Success: Slightly increase chunk size for speed but keep it capped
-                    current_chunk_size = min(500, current_chunk_size + 50)
+                    # Success: keep size fixed at 50
+                    current_chunk_size = 50
                     
                     for log in logs:
                         if len(log['topics']) >= 3:
@@ -471,7 +472,7 @@ def scan_debt_tokens():
                                 all_users.add(addr2)
 
                     chunk_start = chunk_end + 1
-                    time.sleep(15.0)
+                    time.sleep(20.0)
 
                 except Exception as e:
                     # Failure: Halve the chunk size dynamically

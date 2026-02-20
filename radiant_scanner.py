@@ -221,7 +221,7 @@ UNDERLYING_ASSETS = {
 TRANSFER_TOPIC = Web3.to_hex(Web3.keccak(text="Transfer(address,address,uint256)"))
 
 TOTAL_BLOCKS_TO_SCAN = 10000 # Polling Config
-CHUNK_SIZE = 100
+CHUNK_SIZE = 50
 SCAN_INTERVAL = 43200
 MULTICALL_BATCH_SIZE = 150
 TIER_1_MAX_HF = 1.050
@@ -248,13 +248,14 @@ def send_telegram_alert(msg, is_error=False):
         pass
 
 def build_token_map():
-    """Hardcoded Variable Debt Token addresses for Radiant V2 Arbitrum."""
+    # Hardcoded Radiant V2 Arbitrum Variable Debt Tokens (Zero RPC Calls)
     return {
-        "USDC_e_Debt": "0xf92d501e74bd1e4308E6676C38Ab4d84389d7Bf3",
-        "WETH_Debt": "0x4e75D4bc81D9AD1a1abc972a3dd53d581e1CE16b",
-        "WBTC_Debt": "0x0e16bAE17C61789d8a96Ea6529d788B633C4c8B6",
-        "USDT_Debt": "0x9C3A8644A9cA181b90094be98dC19496F6b38a24",
-        "ARB_Debt": "0x24C65D9Cbb174e92a472cbaDE2830fB54b6d36e2"
+        "USDC": "0xf92d501e74bd1e4308E6676C38Ab4d84389d7Bf3",
+        "USDC_e": "0xf92d501e74bd1e4308E6676C38Ab4d84389d7Bf3", # Often maps to the same primary stablecoin on Radiant
+        "WETH": "0x4e75D4bc81D9AD1a1abc972a3dd53d581e1CE16b",
+        "WBTC": "0x0e16bAE17C61789d8a96Ea6529d788B633C4c8B6",
+        "USDT": "0x9C3A8644A9cA181b90094be98dC19496F6b38a24",
+        "ARB": "0x24C65D9Cbb174e92a472cbaDE2830fB54b6d36e2"
     }
 
 def get_target_path():
@@ -372,7 +373,7 @@ def scan_debt_tokens():
             print(f"\n🔍 Scanning {name} [{address}]...")
             
             chunk_start = start_block
-            current_chunk_size = 100  # Start moderately
+            current_chunk_size = 50  # Fixed small chunk size
 
             while chunk_start < current_block:
                 chunk_end = min(chunk_start + current_chunk_size - 1, current_block)
@@ -388,10 +389,10 @@ def scan_debt_tokens():
                         'topics': [TRANSFER_TOPIC]
                     })
                     
-                    time.sleep(15.0)  # Extreme throttling per chunk
+                    time.sleep(20.0)  # Extreme throttling per chunk
 
-                    # Success: Slightly increase chunk size for speed but keep it capped
-                    current_chunk_size = min(500, current_chunk_size + 50)
+                    # Success: keep size fixed at 50
+                    current_chunk_size = 50
                     
                     for log in logs:
                         if len(log['topics']) >= 3:
@@ -404,7 +405,7 @@ def scan_debt_tokens():
                                 all_users.add(addr2)
 
                     chunk_start = chunk_end + 1
-                    time.sleep(15.0)
+                    time.sleep(20.0)
 
                 except Exception as e:
                     # Failure: Halve the chunk size dynamically
