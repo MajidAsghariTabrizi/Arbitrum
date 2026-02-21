@@ -462,9 +462,16 @@ async def main():
                     )
                 else:
                     print("⚠️ Scan returned 0 targets. Keeping previous targets in cache.")
-                send_telegram_alert(f"🆘 <b>Radar Crash Alert:</b> <code>{e}</code>", is_error=True)
-                time.sleep(60)
+                
+                print(f"💤 Sleeping for {SCAN_INTERVAL}s...")
+                await asyncio.sleep(SCAN_INTERVAL)
+            except Exception as e:
+                print(f"Error in main loop: {e}")
+                traceback.print_exc()
+                await asyncio.sleep(60)
     except Exception as e:
-        send_telegram_alert(f"🆘 <b>Fatal Scanner Crash:</b> <code>{e}</code>")
-        print(f"💥 FATAL: {e}")
-        time.sleep(60)
+        print(f"Fatal error: {e}")
+        send_telegram_alert(f"🚨 <b>Scanner Fatal Crash:</b>\n<code>{e}</code>", is_error=True)
+
+if __name__ == "__main__":
+    asyncio.run(main())
