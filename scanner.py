@@ -5,6 +5,15 @@ import threading
 import requests
 import random
 import time
+import asyncio
+import aiohttp
+from web3 import Web3
+import json
+import traceback
+import threading
+import requests
+import random
+import time
 from web3 import Web3
 from dotenv import load_dotenv
 from eth_abi import decode
@@ -382,55 +391,24 @@ def scan_debt_tokens():
     print(f"⏱️  Range: {start_block} to {current_block} (~4 Hours history)")
     print(f"📦 Chunk Size: {CHUNK_SIZE} blocks | Total Chunks: ~{(current_block - start_block) // CHUNK_SIZE}")
 
-    # Scan each token (Progressive Feeding: save after each CHUNK)
-    for name, address in token_map.items():
-        try:
-            print(f"\n🔍 Scanning {name} [{address}]...")
-
+    semaphore = asyncio.Semaphore(5) # Limit concurrent requests
+    
+    async with aiohttp.ClientSession() as session:
+        for name, address in token_map.items():
+            print(f"\n🔍 Scanning {name} [{address}] concurrently...")
+            
+            chunks = []
             chunk_start = start_block
-            current_chunk_size = 200  # Start optimistic to speed up on capable nodes
-
             while chunk_start < current_block:
-                chunk_end = min(chunk_start + current_chunk_size - 1, current_block)
-
-                # Show progress
-                print(f"   ⏳ Block: {chunk_start}-{chunk_end} (Size: {chunk_end - chunk_start + 1}) | Found: {len(all_users)}", end="\r")
-
-                try:
-                    logs = rpc_manager.call(w3.eth.get_logs, False, {
-                        'fromBlock': hex(int(chunk_start)),
-                        'toBlock': hex(int(chunk_end)),
-                        'address': Web3.to_checksum_address(address),
-                        'topics': [TRANSFER_TOPIC]
-                    })
-
-                    time.sleep(1.5)  # Force 1.5s delay between EVERY get_logs to prevent 429
-                    
-                    for log in logs:
-                        if len(log['topics']) >= 3:
-                            addr1 = Web3.to_checksum_address("0x" + log['topics'][1].hex()[-40:])
-                            addr2 = Web3.to_checksum_address("0x" + log['topics'][2].hex()[-40:])
-
-                            if addr1 != "0x0000000000000000000000000000000000000000":
-                                all_users.add(addr1)
-                            if addr2 != "0x0000000000000000000000000000000000000000":
-                                all_users.add(addr2)
-
-                    chunk_start = chunk_end + 1
-                    time.sleep(20.0)
-
-                except Exception as e:
-                    # Failure: Halve the chunk size dynamically
-                    print(f"\n   ⚠️ Chunk {chunk_start}-{chunk_end} Failed: {e}. Adapting chunk size...")
-                    current_chunk_size = max(1, current_chunk_size // 2)
-                    if current_chunk_size == 1 and any(k in str(e).lower() for k in ["413", "too large"]):
-                        raise e # Bubble up to RPC Manager for node rotation
-                    time.sleep(120) # 2 min breath before retry on 429
-
-        except Exception as e:
-            print(f"\n   ❌ Error scanning {name}: {e}")
-            send_telegram_alert(f"⚠️ <b>Scanner Error</b> on <code>{name}</code>:\n<code>{e}</code>", is_error=True)
-            continue
+                chunk_end = min(chunk_start + CHUNK_SIZE - 1, current_block)
+                chunks.append((chunk_start, chunk_end))
+                chunk_start = chunk_end + 1
+                
+            tasks = []
+            for start, end in chunks:
+                tasks.append(fetch_logs_for_chunk(session, address, start, end, semaphore, all_users, rpc_manager))
+            
+            await asyncio.gather(*tasks)
 
     # --- FALLBACK MECHANISM ---
     # If network is super quiet, add some known active whales so bot is not empty
@@ -459,14 +437,14 @@ def scan_debt_tokens():
     return tiered_result
 
 
-if __name__ == "__main__":
+async def main():
     send_telegram_alert("🟢 <b>Radar Scanner Started:</b> Hunting for whale debts (10-min intervals).")
     try:
         while True:
             try:
                 print("\n🔍 Starting new radar scan...")
                 start = time.time()
-                tiered_targets = scan_debt_tokens()
+                tiered_targets = await scan_debt_tokens()
 
                 total = len(tiered_targets['tier_1_danger']) + len(tiered_targets['tier_2_watchlist'])
                 elapsed = time.time() - start
@@ -478,19 +456,12 @@ if __name__ == "__main__":
 
                     # Telegram summary
                     send_telegram_alert(
-                        f"📡 <b>Radar Scan Complete</b>\n"
-                        f"🔴 Tier 1 (Danger): {len(tiered_targets['tier_1_danger'])}\n"
-                        f"🟠 Tier 2 (Watchlist): {len(tiered_targets['tier_2_watchlist'])}\n"
-                        f"⏱️ Duration: {elapsed:.0f}s"
+                        f"🎯 <b>Scanner Update ({elapsed:.0f}s)</b>\n"
+                        f"⚠️ Tier 1 (Danger): {len(tiered_targets['tier_1_danger'])}\n"
+                        f"👀 Tier 2 (Watch): {len(tiered_targets['tier_2_watchlist'])}"
                     )
                 else:
                     print("⚠️ Scan returned 0 targets. Keeping previous targets in cache.")
-
-                print(f"⏳ Sleeping for {SCAN_INTERVAL} seconds ({SCAN_INTERVAL // 60} mins)...")
-                time.sleep(SCAN_INTERVAL)
-
-            except Exception as e:
-                print(f"❌ Radar Error: {e}")
                 send_telegram_alert(f"🆘 <b>Radar Crash Alert:</b> <code>{e}</code>", is_error=True)
                 time.sleep(60)
     except Exception as e:
