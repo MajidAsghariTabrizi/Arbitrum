@@ -146,17 +146,10 @@ MULTICALL3_ABI = [
 ]
 
 COMPTROLLER_ABI = [{
-    "constant": True,
-    "inputs": [{"internalType": "address", "name": "account", "type": "address"}],
+    "constant": True, "inputs": [{"internalType": "address", "name": "account", "type": "address"}],
     "name": "getAccountLiquidity",
-    "outputs": [
-        {"internalType": "uint256", "name": "", "type": "uint256"},
-        {"internalType": "uint256", "name": "", "type": "uint256"},
-        {"internalType": "uint256", "name": "", "type": "uint256"}
-    ],
-    "payable": False,
-    "stateMutability": "view",
-    "type": "function"
+    "outputs": [{"internalType": "uint256", "name": "error", "type": "uint256"}, {"internalType": "uint256", "name": "liquidity", "type": "uint256"}, {"internalType": "uint256", "name": "shortfall", "type": "uint256"}],
+    "payable": False, "stateMutability": "view", "type": "function"
 }]
 
 UNDERLYING_ASSETS = {
