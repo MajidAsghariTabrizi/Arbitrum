@@ -113,8 +113,7 @@ rpc_manager = SmartSyncRPCManager()
 w3 = rpc_manager.premium_w3
 
 # --- CONFIGURATION (LODESTAR SPECIFIC) ---
-POOL_ADDRESSES_PROVIDER = Web3.to_checksum_address("0x264906F21b6DDFc07f43372fC24422B9c0587a8b")
-DATA_PROVIDER_ADDRESS = Web3.to_checksum_address("0x738D5f78bc4C50D3BE9eE60b1e428e3A50b18f02")
+COMPTROLLER_ADDRESS = Web3.to_checksum_address("0x264906F21b6DDFc07f43372fC24422B9c0587a8b")
 
 MULTICALL3_ADDRESS = Web3.to_checksum_address("0xcA11bde05977b3631167028862bE2a173976CA11")
 MULTICALL3_ABI = [
@@ -146,37 +145,16 @@ MULTICALL3_ABI = [
     }
 ]
 
-ADDRESSES_PROVIDER_ABI = [{
-    "inputs": [],
-    "name": "getLendingPool",
-    "outputs": [{"internalType": "address", "name": "", "type": "address"}],
-    "stateMutability": "view",
-    "type": "function"
-}]
-
-POOL_ABI = [{
-    "inputs": [{"internalType": "address", "name": "user", "type": "address"}],
-    "name": "getUserAccountData",
+COMPTROLLER_ABI = [{
+    "constant": True,
+    "inputs": [{"internalType": "address", "name": "account", "type": "address"}],
+    "name": "getAccountLiquidity",
     "outputs": [
-        {"internalType": "uint256", "name": "totalCollateralETH", "type": "uint256"},
-        {"internalType": "uint256", "name": "totalDebtETH", "type": "uint256"},
-        {"internalType": "uint256", "name": "availableBorrowsETH", "type": "uint256"},
-        {"internalType": "uint256", "name": "currentLiquidationThreshold", "type": "uint256"},
-        {"internalType": "uint256", "name": "ltv", "type": "uint256"},
-        {"internalType": "uint256", "name": "healthFactor", "type": "uint256"}
+        {"internalType": "uint256", "name": "", "type": "uint256"},
+        {"internalType": "uint256", "name": "", "type": "uint256"},
+        {"internalType": "uint256", "name": "", "type": "uint256"}
     ],
-    "stateMutability": "view",
-    "type": "function"
-}]
-
-DATA_PROVIDER_ABI = [{
-    "inputs": [{"internalType": "address", "name": "asset", "type": "address"}],
-    "name": "getReserveTokensAddresses",
-    "outputs": [
-        {"internalType": "address", "name": "aTokenAddress", "type": "address"},
-        {"internalType": "address", "name": "stableDebtTokenAddress", "type": "address"},
-        {"internalType": "address", "name": "variableDebtTokenAddress", "type": "address"}
-    ],
+    "payable": False,
     "stateMutability": "view",
     "type": "function"
 }]
@@ -191,7 +169,8 @@ UNDERLYING_ASSETS = {
     "LINK":   "0xf97f4df75117a78c1A5a0DBb814Af92455853904",
 }
 
-TRANSFER_TOPIC = Web3.to_hex(Web3.keccak(text="Transfer(address,address,uint256)"))
+# Borrow event signature in Compound V2
+BORROW_TOPIC = "0x13ed6866d4e1ee6da46f845c46d7e54120883d75c5ea9a2dacc1c4ca8984ab80"
 
 TOTAL_BLOCKS_TO_SCAN = 10000 # Polling Config
 CHUNK_SIZE = 200
@@ -247,17 +226,10 @@ def save_targets_atomic(targets_data):
 def classify_targets_multicall(all_users_list):
     w3 = rpc_manager.premium_w3
     
-    # 1. Fetch dynamic pool address first
-    addresses_provider = w3.eth.contract(address=POOL_ADDRESSES_PROVIDER, abi=ADDRESSES_PROVIDER_ABI)
-    try:
-        dynamic_pool_address = rpc_manager.call(addresses_provider.functions.getLendingPool().call, False, {'to': POOL_ADDRESSES_PROVIDER})
-    except Exception as e:
-        print(f"  ❌ Failed to fetch dynamic Pool Address: {e}")
-        return {"tier_1_danger": [], "tier_2_watchlist": []}
-
-    # 2. Instantiate pool with dynamic address
-    pool = w3.eth.contract(address=dynamic_pool_address, abi=POOL_ABI)
+    # Instantiate Comptroller
+    comptroller = w3.eth.contract(address=COMPTROLLER_ADDRESS, abi=COMPTROLLER_ABI)
     multicall_contract = w3.eth.contract(address=MULTICALL3_ADDRESS, abi=MULTICALL3_ABI)
+    
     tier_1 = []
     tier_2 = []
     discarded = 0
@@ -267,8 +239,8 @@ def classify_targets_multicall(all_users_list):
         calls = []
         for user in batch:
             try:
-                call_data = pool.functions.getUserAccountData(Web3.to_checksum_address(user))._encode_transaction_data()
-                calls.append((dynamic_pool_address, call_data))
+                call_data = comptroller.functions.getAccountLiquidity(Web3.to_checksum_address(user))._encode_transaction_data()
+                calls.append((COMPTROLLER_ADDRESS, call_data))
             except Exception:
                 continue
             
@@ -282,6 +254,7 @@ def classify_targets_multicall(all_users_list):
         except Exception as e:
             print(f"  ⚠️ Multicall batch failed: {e}")
             continue
+            
         for i, (success, raw_bytes) in enumerate(return_data):
             if not success or not raw_bytes:
                 discarded += 1
@@ -289,15 +262,20 @@ def classify_targets_multicall(all_users_list):
             
             user = batch[i]
             try:
-                decoded = decode(['uint256', 'uint256', 'uint256', 'uint256', 'uint256', 'uint256'], raw_bytes)
-                hf_raw = decoded[5]
-                if hf_raw == 0:
+                # Returns (error, liquidity, shortfall)
+                decoded = decode(['uint256', 'uint256', 'uint256'], raw_bytes)
+                error_code = decoded[0]
+                liquidity = decoded[1]
+                shortfall = decoded[2]
+                
+                if error_code != 0:
                     discarded += 1
                     continue
-                hf = hf_raw / 1e18
-                if hf < TIER_1_MAX_HF:
+                
+                # Compound V2 Logic
+                if shortfall > 0:
                     tier_1.append(user)
-                elif hf < TIER_2_MAX_HF:
+                elif shortfall == 0 and liquidity < 500 * (10**18):
                     tier_2.append(user)
                 else:
                     discarded += 1
@@ -319,7 +297,7 @@ async def fetch_logs_for_chunk(session, address, start_block, end_block, semapho
                 "address": address,
                 "fromBlock": hex(start_block),
                 "toBlock": hex(end_block),
-                "topics": [TRANSFER_TOPIC]
+                "topics": [BORROW_TOPIC]
             }],
             "id": 1
         }
@@ -339,13 +317,16 @@ async def fetch_logs_for_chunk(session, address, start_block, end_block, semapho
                         
                         logs = data.get('result', [])
                         for log in logs:
-                            topics = log.get('topics', [])
-                            # Topic 1 (from) and Topic 2 (to)
-                            for t in topics[1:3]:
-                                if t and len(t) >= 66:
-                                    user = Web3.to_checksum_address("0x" + t[-40:])
-                                    if user != "0x0000000000000000000000000000000000000000":
-                                        all_users.add(user)
+                            # In Compound V2 Borrow(address borrower, uint256 borrowAmount, uint256 accountBorrows, uint256 totalBorrows)
+                            # The borrower is usually the first 32 bytes of the non-indexed data
+                            log_data = log.get('data', '')
+                            if log_data and len(log_data) >= 66:
+                                # Extract borrower: 0x + first 32 bytes (64 hex characters)
+                                # The address is the last 40 characters inside those 64 characters
+                                borrower_hex = "0x" + log_data[2:66][-40:]
+                                user = Web3.to_checksum_address(borrower_hex)
+                                if user != "0x0000000000000000000000000000000000000000":
+                                    all_users.add(user)
                         return # Success
                     elif response.status in [429, 403, 413]:
                         rpc_manager.handle_rate_limit(url)

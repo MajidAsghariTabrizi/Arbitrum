@@ -71,78 +71,71 @@ SCOUT_INTERVAL = 10          # Scout (Tier 2) runs every N blocks
 TIER_1_MAX_HF = Decimal('1.050')
 TIER_2_MAX_HF = Decimal('1.200')
 
-# Lodestar Finance Addresses
-POOL_ADDRESSES_PROVIDER = AsyncWeb3.to_checksum_address("0x264906F21b6DDFc07f43372fC24422B9c0587a8b")
-# POOL_ADDRESS removed (fetched dynamically)
-DATA_PROVIDER_ADDRESS = AsyncWeb3.to_checksum_address("0x738D5f78bc4C50D3BE9eE60b1e428e3A50b18f02")
-# Note: QUOTER is not used directly here, but available if needed.
-QUOTER_V2_ADDRESS = AsyncWeb3.to_checksum_address("0x61fFE014bA17989E743c5F6cB21bF9697530B21e")
+# Lodestar Finance Addresses (Compound V2)
+COMPTROLLER_ADDRESS = AsyncWeb3.to_checksum_address("0x264906F21b6DDFc07f43372fC24422B9c0587a8b")
 
-# Multicall3 — Arbitrum One (EIP-55 Checksummed)
+# Multicall3 — Arbitrum One
 MULTICALL3_ADDRESS = AsyncWeb3.to_checksum_address("0xcA11bde05977b3631167028862bE2a173976CA11")
 MULTICALL3_ABI = [{"inputs":[{"components":[{"internalType":"address","name":"target","type":"address"},{"internalType":"bytes","name":"callData","type":"bytes"}],"internalType":"struct Multicall3.Call[]","name":"calls","type":"tuple[]"}],"name":"aggregate","outputs":[{"internalType":"uint256","name":"blockNumber","type":"uint256"},{"internalType":"bytes[]","name":"returnData","type":"bytes[]"}],"stateMutability":"view","type":"function"}]
 
 # ABIs
-POOL_ABI = [{
-    "inputs": [{"internalType": "address", "name": "user", "type": "address"}],
-    "name": "getUserAccountData",
+COMPTROLLER_ABI = [{
+    "constant": True,
+    "inputs": [{"internalType": "address", "name": "account", "type": "address"}],
+    "name": "getAccountLiquidity",
     "outputs": [
-        {"internalType": "uint256", "name": "totalCollateralETH", "type": "uint256"},
-        {"internalType": "uint256", "name": "totalDebtETH", "type": "uint256"},
-        {"internalType": "uint256", "name": "availableBorrowsETH", "type": "uint256"},
-        {"internalType": "uint256", "name": "currentLiquidationThreshold", "type": "uint256"},
-        {"internalType": "uint256", "name": "ltv", "type": "uint256"},
-        {"internalType": "uint256", "name": "healthFactor", "type": "uint256"}
+        {"internalType": "uint256", "name": "", "type": "uint256"},
+        {"internalType": "uint256", "name": "", "type": "uint256"},
+        {"internalType": "uint256", "name": "", "type": "uint256"}
     ],
+    "payable": False,
     "stateMutability": "view",
     "type": "function"
 }, {
+    "constant": True,
     "inputs": [],
-    "name": "getReservesList",
+    "name": "oracle",
+    "outputs": [{"internalType": "address", "name": "", "type": "address"}],
+    "payable": False,
+    "stateMutability": "view",
+    "type": "function"
+}, {
+    "constant": True,
+    "inputs": [],
+    "name": "getAllMarkets",
     "outputs": [{"internalType": "address[]", "name": "", "type": "address[]"}],
+    "payable": False,
     "stateMutability": "view",
     "type": "function"
 }]
 
-DATA_PROVIDER_ABI = [{
-    "inputs": [
-        {"internalType": "address", "name": "asset", "type": "address"},
-        {"internalType": "address", "name": "user", "type": "address"}
-    ],
-    "name": "getUserReserveData",
+CTOKEN_ABI = [{
+    "constant": True,
+    "inputs": [{"internalType": "address", "name": "account", "type": "address"}],
+    "name": "getAccountSnapshot",
     "outputs": [
-        {"internalType": "uint256", "name": "currentATokenBalance", "type": "uint256"},
-        {"internalType": "uint256", "name": "currentStableDebt", "type": "uint256"},
-        {"internalType": "uint256", "name": "currentVariableDebt", "type": "uint256"},
-        {"internalType": "uint256", "name": "principalStableDebt", "type": "uint256"},
-        {"internalType": "uint256", "name": "scaledVariableDebt", "type": "uint256"},
-        {"internalType": "uint256", "name": "stableBorrowRate", "type": "uint256"},
-        {"internalType": "uint256", "name": "liquidityRate", "type": "uint256"},
-        {"internalType": "uint40", "name": "stableRateLastUpdated", "type": "uint40"},
-        {"internalType": "bool", "name": "usageAsCollateralEnabled", "type": "bool"}
+        {"internalType": "uint256", "name": "", "type": "uint256"},
+        {"internalType": "uint256", "name": "", "type": "uint256"},
+        {"internalType": "uint256", "name": "", "type": "uint256"},
+        {"internalType": "uint256", "name": "", "type": "uint256"}
     ],
+    "payable": False,
+    "stateMutability": "view",
+    "type": "function"
+}, {
+    "constant": True,
+    "inputs": [],
+    "name": "underlying",
+    "outputs": [{"internalType": "address", "name": "", "type": "address"}],
+    "payable": False,
     "stateMutability": "view",
     "type": "function"
 }]
 
 ORACLE_ABI = [{
-    "inputs": [{"internalType": "address[]", "name": "assets", "type": "address[]"}],
-    "name": "getAssetsPrices",
-    "outputs": [{"internalType": "uint256[]", "name": "", "type": "uint256[]"}],
-    "stateMutability": "view",
-    "type": "function"
-}]
-
-ADDRESSES_PROVIDER_ABI = [{
-    "inputs": [],
-    "name": "getPriceOracle",
-    "outputs": [{"internalType": "address", "name": "", "type": "address"}],
-    "stateMutability": "view",
-    "type": "function"
-}, {
-    "inputs": [],
-    "name": "getLendingPool",
-    "outputs": [{"internalType": "address", "name": "", "type": "address"}],
+    "inputs": [{"internalType": "address", "name": "cToken", "type": "address"}],
+    "name": "getUnderlyingPrice",
+    "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
     "stateMutability": "view",
     "type": "function"
 }]
@@ -243,10 +236,9 @@ class LodestarBot:
         self.account = None
 
         # Contracts
-        self.pool = None
-        self.data_provider = None
-        self.addresses_provider = None
+        self.comptroller = None
         self.liquidator_contract = None
+        self.multicall = None
         self.oracle_contract = None
 
         # ================================================================
@@ -277,43 +269,25 @@ class LodestarBot:
         self.account = self.w3.eth.account.from_key(PRIVATE_KEY)
         logger.info(f"🔑 Loaded Wallet: {self.account.address}")
         
-        # Initialize contracts blindly (trust addresses)
-        self.data_provider = self.w3.eth.contract(address=DATA_PROVIDER_ADDRESS, abi=DATA_PROVIDER_ABI)
-        self.addresses_provider = self.w3.eth.contract(address=POOL_ADDRESSES_PROVIDER, abi=ADDRESSES_PROVIDER_ABI)
+        self.comptroller = self.w3.eth.contract(address=COMPTROLLER_ADDRESS, abi=COMPTROLLER_ABI)
         self.liquidator_contract = self.w3.eth.contract(address=LIQUIDATOR_ADDRESS, abi=LIQUIDATOR_ABI)
-
-        # Dynamic Pool Fetch
-        pool_addr = await self.addresses_provider.functions.getLendingPool().call()
-        logger.info(f"🏊 Lodestar Lending Pool found at: {pool_addr}")
-        self.pool = self.w3.eth.contract(address=pool_addr, abi=POOL_ABI)
-        # Multicall3 — used for batched health-factor checks
         self.multicall = self.w3.eth.contract(address=MULTICALL3_ADDRESS, abi=MULTICALL3_ABI)
 
-        # Try to fetch Oracle address dynamically, but don't crash if it fails
+        # Try to fetch Oracle address dynamically from Comptroller
         try:
-            oracle_addr = await self.addresses_provider.functions.getPriceOracle().call()
+            oracle_addr = await self.comptroller.functions.oracle().call()
             self.oracle_contract = self.w3.eth.contract(address=oracle_addr, abi=ORACLE_ABI)
         except Exception as e:
-            logger.warning(f"⚠️ Failed to fetch Oracle from AddressesProvider: {e}")
+            logger.warning(f"⚠️ Failed to fetch Oracle from Comptroller: {e}")
             self.oracle_contract = None
 
-        # Try to cache reserves list, but don't crash
+        # Try to cache markets list, but don't crash
         try:
-            self.reserves_list = await self.pool.functions.getReservesList().call()
-            logger.info(f"📚 Loaded {len(self.reserves_list)} market assets.")
+            self.reserves_list = await self.comptroller.functions.getAllMarkets().call()
+            logger.info(f"📚 Loaded {len(self.reserves_list)} generic markets.")
         except Exception as e:
-            logger.warning(f"⚠️ Failed to fetch Reserves List: {e}")
-            # Fallback list (Common Blue-Chips on Lodestar)
-            self.reserves_list = [
-                "0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8", # USDC.e
-                "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1", # WETH
-                "0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f", # WBTC
-                "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9", # USDT
-                "0x912CE59144191C1204E64559FE8253a0e49E6548", # ARB
-                "0x539bdE0d7Dbd33f84E8aaf9084C942D9800Ef002"  # MAGIC
-            ]
-            self.reserves_list = [AsyncWeb3.to_checksum_address(addr) for addr in self.reserves_list]
-            logger.info(f"⚠️ Using hardcoded fallback logic for {len(self.reserves_list)} assets.")
+            logger.warning(f"⚠️ Failed to fetch Markets List: {e}")
+            self.reserves_list = []
 
     async def log_system(self, msg, level="info"):
         if level == "error":
@@ -364,12 +338,13 @@ class LodestarBot:
         if not self.oracle_contract:
             return
 
-        try:
-            prices = await self.oracle_contract.functions.getAssetsPrices(self.reserves_list).call()
-            for i, asset in enumerate(self.reserves_list):
-                self.prices[asset] = prices[i]
-        except Exception as e:
-            logger.warning(f"Price update failed: {e}")
+        for ctoken in self.reserves_list:
+            try:
+                price = await self.oracle_contract.functions.getUnderlyingPrice(ctoken).call()
+                self.prices[ctoken] = price
+            except Exception as e:
+                pass
+            await asyncio.sleep(0.05)
 
     async def get_decimals(self, token):
         if token in self.asset_decimals:
@@ -439,45 +414,47 @@ class LodestarBot:
 
         # Soft-Start Initialization
         results = []
-        for asset in self.reserves_list:
+        for ctoken_addr in self.reserves_list:
             try:
-                task = self.data_provider.functions.getUserReserveData(asset, user).call()
+                ctoken = self.w3.eth.contract(address=ctoken_addr, abi=CTOKEN_ABI)
+                task = ctoken.functions.getAccountSnapshot(user).call()
                 res = await task
-                results.append(res)
+                results.append((ctoken_addr, res))
             except Exception as e:
-                results.append(e)
-            await asyncio.sleep(0.1) # Throttle to stay under QuickNode RPS limit
+                pass
+            await asyncio.sleep(0.1) 
 
-        for i, res in enumerate(results):
-            if isinstance(res, Exception):
+        for ctoken_addr, res in results:
+            error_code, ctoken_bal, borrow_bal, exchange_rate = res
+            if error_code != 0:
                 continue
 
-            asset = self.reserves_list[i]
-            # Fallback to 1 base unit if oracle fails (assume parity if price unknown)
-            # This allows liquidation attempt even if price feed is down
-            price = self.prices.get(asset, 10**18)
+            # In Compound V2, getUnderlyingPrice(cToken) returns pre-scaled price 1e(36 - decimals)
+            # which we use for generic comparisons.
+            price = self.prices.get(ctoken_addr, 10**18)
+            try:
+                ctoken = self.w3.eth.contract(address=ctoken_addr, abi=CTOKEN_ABI)
+                underlying = await ctoken.functions.underlying().call()
+            except:
+                underlying = ctoken_addr
 
-            # Collateral (Index 0)
-            collateral_bal = res[0]
-            if collateral_bal > 0:
-                decimals = await self.get_decimals(asset)
-                # We normalize to 'value units' for comparison.
-                value = (Decimal(collateral_bal) / Decimal(10**decimals)) * Decimal(price)
+            # Collateral Value
+            if ctoken_bal > 0:
+                underlying_bal = Decimal(ctoken_bal) * Decimal(exchange_rate) / Decimal(10**18)
+                value = underlying_bal * Decimal(price)
                 if value > max_collateral_value:
                     max_collateral_value = value
-                    best_collateral = asset
+                    best_collateral = underlying
 
-            # Debt — Variable (Index 2)
-            variable_debt = res[2]
-            if variable_debt > 0:
-                decimals = await self.get_decimals(asset)
-                value = (Decimal(variable_debt) / Decimal(10**decimals)) * Decimal(price)
+            # Debt Value
+            if borrow_bal > 0:
+                value = Decimal(borrow_bal) * Decimal(price)
                 if value > max_debt_value:
                     max_debt_value = value
-                    best_debt = asset
-                    debt_amount_raw = variable_debt
+                    best_debt = underlying
+                    debt_amount_raw = borrow_bal
 
-        return best_debt, best_collateral, debt_amount_raw, max_debt_value
+        return best_debt, best_collateral, debt_amount_raw, float(max_debt_value / Decimal(10**36))
 
     # ================================================================
     # PRE-FLIGHT SIMULATION — Simulate TX before broadcasting
@@ -620,16 +597,15 @@ class LodestarBot:
 
     async def multicall_scan(self, targets, task_name, block_number):
         """
-        Batch-check a list of targets via Multicall3.
-        Returns list of (user, hf_decimal, collateral_val, debt_val) tuples.
+        Batch-check a list of targets via Multicall3 using Comptroller given Compound V2 logic.
         """
         if not targets:
             return []
 
         calls = []
         for user in targets:
-            call_data = self.pool.functions.getUserAccountData(user)._encode_transaction_data()
-            calls.append((self.pool.address, call_data))
+            call_data = self.comptroller.functions.getAccountLiquidity(user)._encode_transaction_data()
+            calls.append((self.comptroller.address, call_data))
 
         try:
             _, return_data = await self.multicall.functions.aggregate(calls).call()
@@ -644,16 +620,22 @@ class LodestarBot:
         for i, raw_bytes in enumerate(return_data):
             user = targets[i]
             try:
-                decoded_data = decode(
-                    ['uint256', 'uint256', 'uint256', 'uint256', 'uint256', 'uint256'],
-                    raw_bytes
-                )
+                decoded_data = decode(['uint256', 'uint256', 'uint256'], raw_bytes)
+                error_code = decoded_data[0]
+                liquidity = decoded_data[1]
+                shortfall = decoded_data[2]
 
-                total_collateral_val = float(Decimal(decoded_data[0]) / Decimal(10**18))
-                total_debt_val = float(Decimal(decoded_data[1]) / Decimal(10**18))
-                hf = Decimal(decoded_data[5]) / Decimal(10**18)
+                if error_code != 0:
+                    continue
 
-                results.append((user, hf, total_collateral_val, total_debt_val))
+                if shortfall > 0:
+                    hf = Decimal('0.5') # Translates to Tier 1
+                elif liquidity < 500 * 10**18:
+                    hf = Decimal('1.1') # Translates to Tier 2
+                else:
+                    hf = Decimal('2.0') # Immune
+
+                results.append((user, hf, 0.0, 0.0))
 
             except Exception as e:
                 logger.warning(f"⚠️ [{task_name}] Failed to decode data for {user}: {e}")
