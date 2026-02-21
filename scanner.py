@@ -342,7 +342,7 @@ def classify_targets_multicall(all_users_list):
     return {"tier_1_danger": tier_1, "tier_2_watchlist": tier_2}
 
 
-def scan_debt_tokens():
+async def scan_debt_tokens():
     """Phase 1: Discover borrower addresses from Transfer events on debt tokens."""
     global RPC_WAS_DOWN
 
