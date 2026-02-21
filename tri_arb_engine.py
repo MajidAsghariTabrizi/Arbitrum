@@ -688,11 +688,11 @@ async def perform_multicall(multicall_contract, calls_list: List[Tuple[str, byte
     chunks = [calls_list[i : i + MULTICALL_CHUNK_SIZE] for i in range(0, len(calls_list), MULTICALL_CHUNK_SIZE)]
     
     # Re-enable parallel gather but STRICTLY throttle concurrency to respect 20 RPS limit
-    sem = asyncio.Semaphore(10) # Max 10 concurrent HTTP requests
+    sem = asyncio.Semaphore(6) # Max 6 concurrent HTTP requests
     async def fetch_chunk_with_sem(task):
         async with sem:
             res = await task
-            await asyncio.sleep(0.05) # Mandatory 50ms micro-delay to smooth out the RPS curve
+            await asyncio.sleep(0.1) # Mandatory 100ms micro-delay to smooth out the RPS curve
             return res
 
     # Execute all tasks concurrently through the semaphore

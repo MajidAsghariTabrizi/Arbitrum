@@ -964,11 +964,11 @@ async def scan_and_execute(rpc_manager: SmartAsyncRPCManager, current_block: int
         chunks = [leg_a_calls[i : i + MULTICALL_CHUNK_SIZE] for i in range(0, len(leg_a_calls), MULTICALL_CHUNK_SIZE)]
         
         # Re-enable parallel gather but STRICTLY throttle concurrency to respect 20 RPS limit
-        sem = asyncio.Semaphore(10) # Max 10 concurrent HTTP requests
+        sem = asyncio.Semaphore(6) # Max 6 concurrent HTTP requests
         async def fetch_chunk_with_sem(task):
             async with sem:
                 res = await task
-                await asyncio.sleep(0.05) # Mandatory 50ms micro-delay to smooth out the RPS curve
+                await asyncio.sleep(0.1) # Mandatory 100ms micro-delay to smooth out the RPS curve
                 return res
 
         # Execute all tasks concurrently through the semaphore
@@ -1066,11 +1066,11 @@ async def scan_and_execute(rpc_manager: SmartAsyncRPCManager, current_block: int
         chunks_b = [leg_b_calls[i : i + MULTICALL_CHUNK_SIZE] for i in range(0, len(leg_b_calls), MULTICALL_CHUNK_SIZE)]
         
         # Re-enable parallel gather but STRICTLY throttle concurrency to respect 20 RPS limit
-        sem = asyncio.Semaphore(10) # Max 10 concurrent HTTP requests
+        sem = asyncio.Semaphore(6) # Max 6 concurrent HTTP requests
         async def fetch_chunk_with_sem(task):
             async with sem:
                 res = await task
-                await asyncio.sleep(0.05) # Mandatory 50ms micro-delay to smooth out the RPS curve
+                await asyncio.sleep(0.1) # Mandatory 100ms micro-delay to smooth out the RPS curve
                 return res
 
         # Execute all tasks concurrently through the semaphore
