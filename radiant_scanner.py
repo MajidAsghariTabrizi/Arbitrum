@@ -31,19 +31,31 @@ class SmartSyncRPCManager:
                            "oserror", "gaierror", "remotedisconnected"]
 
     def __init__(self):
+        # Force load latest .env to capture manual PM2 changes
+        load_dotenv(override=True)
         self.primary_url = os.getenv("SCANNER_RPC")
         fallback_rpcs_raw = os.getenv("FALLBACK_RPCS", "").replace('"', '').replace("'", "").split(",")
         self.fallback_urls = [url.strip() for url in fallback_rpcs_raw if url.strip()]
+        
+        # Hardcoded emergency fallbacks in case env parsing fails or nodes are instantly dead
+        emergency_fallbacks = ["https://1rpc.io/arb", "https://arbitrum.drpc.org"]
+        self.fallback_urls.extend(emergency_fallbacks)
 
         if not self.primary_url:
-            print("❌ SCANNER_RPC not found in .env")
-            exit()
+            print("⚠️ SCANNER_RPC not found in .env, defaulting to emergency fallback.")
+            self.primary_url = emergency_fallbacks[0]
 
         self.rpc_urls = [self.primary_url] + self.fallback_urls
         self.current_index = 0
         self.active_url = self.rpc_urls[self.current_index]
 
         self.premium_w3 = Web3(Web3.HTTPProvider(self.active_url, request_kwargs={'timeout': 60}))
+        
+        # Basic connectivity check
+        if not self.premium_w3.is_connected():
+            print(f"⚠️ Primary RPC {self.active_url[:30]} failed instantly. Rotating...")
+            self.handle_rate_limit(self.active_url)
+            
         self.on_fallback = False
         self.strike_count = 0
 

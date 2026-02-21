@@ -398,7 +398,7 @@ class AntiGravityBot:
         # Fallback seeding: ensure bot always has something to monitor
         if not self.tier_1_danger and not self.tier_2_watchlist:
             logger.warning("⚠️ No targets loaded — seeding Tier 2 with hardcoded whale fallbacks.")
-            self.tier_2_watchlist = HARDCODED_FALLBACK_TARGETS
+            self.tier_2_watchlist = [self.w3.to_checksum_address(addr) for addr in HARDCODED_FALLBACK_TARGETS]
 
     async def analyze_user_assets(self, user):
         """Finds best debt and collateral for a liquidatable user."""
