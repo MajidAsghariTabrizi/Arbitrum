@@ -127,7 +127,34 @@ DATA_PROVIDER_ADDRESS = Web3.to_checksum_address("0x69FA688f1Dc47d4B5d8029D5a35F
 
 # Multicall3 — Arbitrum One
 MULTICALL3_ADDRESS = Web3.to_checksum_address("0xcA11bde05977b3631167028862bE2a173976CA11")
-MULTICALL3_ABI = [{"inputs":[{"components":[{"internalType":"address","name":"target","type":"address"},{"internalType":"bytes","name":"callData","type":"bytes"}],"internalType":"struct Multicall3.Call[]","name":"calls","type":"tuple[]"}],"name":"aggregate","outputs":[{"internalType":"uint256","name":"blockNumber","type":"uint256"},{"internalType":"bytes[]","name":"returnData","type":"bytes[]"}],"stateMutability":"view","type":"function"}]
+MULTICALL3_ABI = [
+    {
+        "inputs": [
+            {"name": "requireSuccess", "type": "bool"},
+            {
+                "components": [
+                    {"name": "target", "type": "address"},
+                    {"name": "callData", "type": "bytes"}
+                ],
+                "name": "calls",
+                "type": "tuple[]"
+            }
+        ],
+        "name": "tryAggregate",
+        "outputs": [
+            {
+                "components": [
+                    {"name": "success", "type": "bool"},
+                    {"name": "returnData", "type": "bytes"}
+                ],
+                "name": "returnData",
+                "type": "tuple[]"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    }
+]
 
 # Pool ABI — getUserAccountData for HF classification
 POOL_ABI = [{
@@ -293,15 +320,19 @@ def classify_targets_multicall(all_users_list):
             continue
 
         try:
-            _, return_data = rpc_manager.call(
-                multicall_contract.functions.aggregate(calls).call, False, {'to': MULTICALL3_ADDRESS}
+            return_data = rpc_manager.call(
+                multicall_contract.functions.tryAggregate(False, calls).call, False, {'to': MULTICALL3_ADDRESS}
             )
         except Exception as e:
             print(f"  ⚠️ Multicall batch failed (offset {batch_start}): {e}")
             continue
 
         # Decode each result
-        for i, raw_bytes in enumerate(return_data):
+        for i, (success, raw_bytes) in enumerate(return_data):
+            if not success or not raw_bytes:
+                discarded += 1
+                continue
+                
             user = batch[i]
             try:
                 decoded = decode(
