@@ -35,10 +35,10 @@ module.exports = {
             env: { PYTHONUNBUFFERED: "1" },
         },
 
-        // ── Radiant V2 Liquidation Sniper ───────────────────────────
+        // ── Lodestar Liquidation Sniper ───────────────────────────
         {
-            name: "radiant-bot",
-            script: "radiant_bot.py",
+            name: "lodestar-bot",
+            script: "lodestar_bot.py",
             interpreter: "python3",
             cwd: "/root/Arbitrum",
             autorestart: true,
@@ -85,10 +85,10 @@ module.exports = {
             env: { PYTHONUNBUFFERED: "1" },
         },
 
-        // ── Radiant Background Scanner (24/7) ────────────────────────
+        // ── Lodestar Background Scanner (24/7) ────────────────────────
         {
-            name: "radiant-scanner",
-            script: "radiant_scanner.py",
+            name: "lodestar-scanner",
+            script: "lodestar_scanner.py",
             interpreter: "python3",
             cwd: "/root/Arbitrum",
             autorestart: true,
