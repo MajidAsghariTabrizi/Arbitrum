@@ -12,6 +12,14 @@ from eth_abi import decode
 # Load Env
 load_dotenv()
 
+def ensure_json_exists(filepath: str):
+    if not os.path.exists(filepath):
+        with open(filepath, 'w') as f:
+            json.dump({"tier_1_danger": [], "tier_2_watchlist": []}, f)
+
+# Ensure local targets file exists for sniper bots
+ensure_json_exists("targets.json")
+
 # --- RPC MANAGER (Strict QoS Lane: Tier 3 → SCANNER_RPC) ---
 class SmartSyncRPCManager:
     """
@@ -421,9 +429,9 @@ def scan_debt_tokens():
     if len(all_users) == 0:
         print("\n⚠️ Network quiet. Adding fallback targets (Active Whales) to ensure bot runs.")
         fallback_targets = [
-            "0x99525208453488C9518001712C7F72428514197F",
-            "0x5a52E96BAcdaBb82fd05763E25335261B270Efcb",
-            "0xF977814e90dA44bFA03b6295A0616a897441aceC"
+            Web3.to_checksum_address("0x99525208453488C9518001712C7F72428514197F"),
+            Web3.to_checksum_address("0x5a52E96BAcdaBb82fd05763E25335261B270Efcb"),
+            Web3.to_checksum_address("0xF977814e90dA44bFA03b6295A0616a897441aceC")
         ]
         all_users.update(fallback_targets)
 

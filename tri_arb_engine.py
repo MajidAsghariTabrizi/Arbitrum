@@ -368,7 +368,7 @@ MIN_PROFIT_USD = 0.50
 SCAN_COOLDOWN_SECONDS = 2.0       # Strict 2.0s rate-limit delay
 LEG_A_SLIPPAGE_BPS = 50           # 0.5% max slippage allowed for tri-arb routes
 SAFETY_MARGIN_MULTIPLIER = 1.5
-MULTICALL_CHUNK_SIZE = 10        # Larger chunks = fewer HTTP requests = faster scans
+MULTICALL_CHUNK_SIZE = 15        # Larger chunks = fewer HTTP requests = faster scans
 
 ALLOWED_CURVE_TOKENS = {"USDC", "USDT", "DAI"}
 
@@ -688,11 +688,11 @@ async def perform_multicall(multicall_contract, calls_list: List[Tuple[str, byte
     chunks = [calls_list[i : i + MULTICALL_CHUNK_SIZE] for i in range(0, len(calls_list), MULTICALL_CHUNK_SIZE)]
     
     # Re-enable parallel gather but STRICTLY throttle concurrency to respect 20 RPS limit
-    sem = asyncio.Semaphore(4) # Max 4 concurrent HTTP requests
+    sem = asyncio.Semaphore(10) # Max 10 concurrent HTTP requests
     async def fetch_chunk_with_sem(task):
         async with sem:
             res = await task
-            await asyncio.sleep(0.1) # Mandatory 100ms micro-delay to smooth out the RPS curve
+            await asyncio.sleep(0.05) # Mandatory 50ms micro-delay to smooth out the RPS curve
             return res
 
     # Execute all tasks concurrently through the semaphore

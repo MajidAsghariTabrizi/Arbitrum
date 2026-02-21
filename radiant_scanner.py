@@ -12,6 +12,14 @@ from eth_abi import decode
 # Load Env
 load_dotenv()
 
+def ensure_json_exists(filepath: str):
+    if not os.path.exists(filepath):
+        with open(filepath, 'w') as f:
+            json.dump({"tier_1_danger": [], "tier_2_watchlist": []}, f)
+
+# Ensure local targets file exists for sniper bots
+ensure_json_exists("radiant_targets.json")
+
 # --- RPC MANAGER (Strict QoS Lane: Tier 3 → SCANNER_RPC) ---
 class SmartSyncRPCManager:
     """
@@ -350,7 +358,10 @@ def scan_debt_tokens():
             continue
 
     if len(all_users) == 0:
-         all_users.update(["0x99525208453488C9518001712C7F72428514197F", "0x5a52E96BAcdaBb82fd05763E25335261B270Efcb"])
+         all_users.update([
+             Web3.to_checksum_address("0x99525208453488C9518001712C7F72428514197F"), 
+             Web3.to_checksum_address("0x5a52E96BAcdaBb82fd05763E25335261B270Efcb")
+         ])
 
     all_users_list = list(all_users)
     print(f"✅ Found {len(all_users_list)} users.")
