@@ -200,12 +200,10 @@ UNDERLYING_ASSETS = {
 # CRITICAL FIX: Use Web3.to_hex to ensure 0x prefix for strict RPC nodes
 TRANSFER_TOPIC = Web3.to_hex(Web3.keccak(text="Transfer(address,address,uint256)"))
 
-# SETTINGS
-TOTAL_BLOCKS_TO_SCAN = 50000   # Check last ~4 hours
-CHUNK_SIZE = 200              # Aave Configuration
-# We aim to keep scan size manageable for free RPCs
-SCAN_INTERVAL = 43200            # 12 hours between scans
-TOTAL_BLOCKS_TO_SCAN = 10000    # Backwards time travel distance
+# Polling Config
+TOTAL_BLOCKS_TO_SCAN = 100000
+CHUNK_SIZE = 200
+SCAN_INTERVAL = 300              # Aave Configuration
 MULTICALL_BATCH_SIZE = 150     # Max addresses per Multicall3 batch
 
 # Tier Thresholds

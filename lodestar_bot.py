@@ -177,9 +177,11 @@ class SmartAsyncRPCManager:
                            "cannot connect", "server disconnected", "connectionreseterror",
                            "clientconnectorerror", "oserror", "gaierror"]
 
-    def __init__(self):
-        self.primary_url = SNIPER_RPC
-        self.rpc_urls = [self.primary_url] + FALLBACK_RPCS.copy()
+        load_dotenv(override=True)
+        self.primary_url = os.getenv("SNIPER_RPC")
+        fallback_rpcs_raw = os.getenv("FALLBACK_RPCS", "").replace('"', '').replace("'", "").split(",")
+        fallback_urls = [url.strip() for url in fallback_rpcs_raw if url.strip()]
+        self.rpc_urls = [self.primary_url] + fallback_urls
         self.current_index = 0
         self.active_url = self.rpc_urls[self.current_index]
         self.w3 = None
