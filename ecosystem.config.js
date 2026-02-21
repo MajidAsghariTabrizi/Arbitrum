@@ -2,17 +2,8 @@
 // 🛸 ANTI-GRAVITY — PM2 Ecosystem Config (Free-Tier Optimized)
 // ═══════════════════════════════════════════════════════════════
 //
-// ARCHITECTURE DECISION: Scanners (scanner.py & radiant_scanner.py)
-// are intentionally EXCLUDED from this startup config.
-//
-// WHY: Historical eth_getLogs calls in the scanners are I/O-heavy
-// and trigger IP-wide 429 rate limits that cripple all arbitrage
-// engines sharing the same free-tier RPC nodes.
-//
-// HOW TO RUN SCANNERS (manually, on-demand only):
-//   pm2 start scanner.py --interpreter python3 --name scanner
-//   pm2 start radiant_scanner.py --interpreter python3 --name radiant-scanner
-//   (Wait for scan to complete, then pm2 stop scanner radiant-scanner)
+// HOW TO RUN:
+//   pm2 start ecosystem.config.js
 //
 // ═══════════════════════════════════════════════════════════════
 
@@ -57,29 +48,51 @@ module.exports = {
             env: { PYTHONUNBUFFERED: "1" },
         },
 
-        // ── DEX Arbitrage Engine ────────────────────────────────────
+        // ── DEX Arbitrage Engine (DISABLED) ─────────────────────────────
+        // {
+        //     name: "arb-engine",
+        //     script: "arb_engine.py",
+        //     interpreter: "python3",
+        //     cwd: "/root/Arbitrum",
+        //     autorestart: true,
+        //     watch: false,
+        //     max_restarts: 20,
+        //     restart_delay: 5000,
+        //     env: { PYTHONUNBUFFERED: "1" },
+        // },
+
+        // ── Triangular Arbitrage Engine (DISABLED) ──────────────────────
+        // {
+        //     name: "tri-arb-engine",
+        //     script: "tri_arb_engine.py",
+        //     interpreter: "python3",
+        //     cwd: "/root/Arbitrum",
+        //     autorestart: true,
+        //     watch: false,
+        //     max_restarts: 20,
+        //     restart_delay: 5000,
+        //     env: { PYTHONUNBUFFERED: "1" },
+        // },
+
+        // ── Aave Background Scanner (24/7) ───────────────────────────
         {
-            name: "arb-engine",
-            script: "arb_engine.py",
+            name: "scanner",
+            script: "scanner.py",
             interpreter: "python3",
             cwd: "/root/Arbitrum",
             autorestart: true,
             watch: false,
-            max_restarts: 20,
-            restart_delay: 5000,
             env: { PYTHONUNBUFFERED: "1" },
         },
 
-        // ── Triangular Arbitrage Engine ─────────────────────────────
+        // ── Radiant Background Scanner (24/7) ────────────────────────
         {
-            name: "tri-arb-engine",
-            script: "tri_arb_engine.py",
+            name: "radiant-scanner",
+            script: "radiant_scanner.py",
             interpreter: "python3",
             cwd: "/root/Arbitrum",
             autorestart: true,
             watch: false,
-            max_restarts: 20,
-            restart_delay: 5000,
             env: { PYTHONUNBUFFERED: "1" },
         },
 

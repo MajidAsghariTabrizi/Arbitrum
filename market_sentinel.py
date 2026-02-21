@@ -125,26 +125,26 @@ class MarketSentinel:
         except Exception as e:
             logger.error(f"❌ Failed to write .system_state: {e}")
 
-        # PM2 process orchestration
+        # PM2 process orchestration disabled (Scanners run 24/7 now)
         if state == "WAR":
-            # Stop background scanners to free up RPC bandwidth
-            try:
-                subprocess.run(["pm2", "stop", "temp-scanner", "temp-radiant-scanner"],
-                               capture_output=True, timeout=10)
-                logger.info("⚔️ WAR MODE: Stopped background scanners (pm2 stop)")
-            except Exception as e:
-                logger.warning(f"⚠️ PM2 stop failed (scanners may not be running): {e}")
+            logger.info("⚔️ WAR MODE: (Background scanners continue running 24/7)")
+            # try:
+            #     subprocess.run(["pm2", "stop", "temp-scanner", "temp-radiant-scanner"],
+            #                    capture_output=True, timeout=10)
+            #     logger.info("⚔️ WAR MODE: Stopped background scanners (pm2 stop)")
+            # except Exception as e:
+            #     logger.warning(f"⚠️ PM2 stop failed (scanners may not be running): {e}")
 
         elif state == "PEACE":
-            # Restart background scanners
-            try:
-                subprocess.run(["pm2", "start", "scanner.py", "--interpreter", "python3",
-                               "--name", "temp-scanner"], capture_output=True, timeout=10)
-                subprocess.run(["pm2", "start", "radiant_scanner.py", "--interpreter", "python3",
-                               "--name", "temp-radiant-scanner"], capture_output=True, timeout=10)
-                logger.info("🕊️ PEACE MODE: Restarted background scanners (pm2 start)")
-            except Exception as e:
-                logger.warning(f"⚠️ PM2 start failed: {e}")
+            logger.info("🕊️ PEACE MODE: (Background scanners continue running 24/7)")
+            # try:
+            #     subprocess.run(["pm2", "start", "scanner.py", "--interpreter", "python3",
+            #                    "--name", "temp-scanner"], capture_output=True, timeout=10)
+            #     subprocess.run(["pm2", "start", "radiant_scanner.py", "--interpreter", "python3",
+            #                    "--name", "temp-radiant-scanner"], capture_output=True, timeout=10)
+            #     logger.info("🕊️ PEACE MODE: Restarted background scanners (pm2 start)")
+            # except Exception as e:
+            #     logger.warning(f"⚠️ PM2 start failed: {e}")
 
     def update_last_price(self):
         """
