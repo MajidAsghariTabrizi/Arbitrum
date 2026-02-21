@@ -170,7 +170,7 @@ UNDERLYING_ASSETS = {
 TRANSFER_TOPIC = Web3.to_hex(Web3.keccak(text="Transfer(address,address,uint256)"))
 
 TOTAL_BLOCKS_TO_SCAN = 10000 # Polling Config
-CHUNK_SIZE = 50
+CHUNK_SIZE = 200
 SCAN_INTERVAL = 43200
 MULTICALL_BATCH_SIZE = 150
 TIER_1_MAX_HF = 1.050
@@ -321,7 +321,7 @@ def scan_debt_tokens():
             print(f"\n🔍 Scanning {name} [{address}]...")
             
             chunk_start = start_block
-            current_chunk_size = 10  # Start smaller to avoid 413 Client Error
+            current_chunk_size = 200  # Start optimistic to speed up on capable nodes
 
             while chunk_start < current_block:
                 chunk_end = min(chunk_start + current_chunk_size - 1, current_block)
