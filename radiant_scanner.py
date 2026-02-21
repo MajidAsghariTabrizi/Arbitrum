@@ -36,14 +36,10 @@ class SmartSyncRPCManager:
         self.primary_url = os.getenv("SCANNER_RPC")
         fallback_rpcs_raw = os.getenv("FALLBACK_RPCS", "").replace('"', '').replace("'", "").split(",")
         self.fallback_urls = [url.strip() for url in fallback_rpcs_raw if url.strip()]
-        
-        # Hardcoded emergency fallbacks in case env parsing fails or nodes are instantly dead
-        emergency_fallbacks = ["https://1rpc.io/arb", "https://arbitrum.drpc.org"]
-        self.fallback_urls.extend(emergency_fallbacks)
 
         if not self.primary_url:
-            print("⚠️ SCANNER_RPC not found in .env, defaulting to emergency fallback.")
-            self.primary_url = emergency_fallbacks[0]
+            print("❌ SCANNER_RPC not found in .env. Exiting.")
+            exit(1)
 
         self.rpc_urls = [self.primary_url] + self.fallback_urls
         self.current_index = 0
@@ -324,7 +320,7 @@ def scan_debt_tokens():
             print(f"\n🔍 Scanning {name} [{address}]...")
             
             chunk_start = start_block
-            current_chunk_size = 200  # Fixed chunk size matching CHUNK_SIZE
+            current_chunk_size = 50  # Start smaller to avoid 413 Client Error
 
             while chunk_start < current_block:
                 chunk_end = min(chunk_start + current_chunk_size - 1, current_block)
@@ -343,7 +339,7 @@ def scan_debt_tokens():
                     time.sleep(1.5)  # Force 1.5s delay between EVERY get_logs to prevent 429
 
                     # Success: keep size fixed
-                    current_chunk_size = 200
+                    current_chunk_size = 50
                     
                     for log in logs:
                         if len(log['topics']) >= 3:
@@ -361,7 +357,7 @@ def scan_debt_tokens():
                 except Exception as e:
                     # Failure: Halve the chunk size dynamically
                     print(f"\n   ⚠️ Chunk {chunk_start}-{chunk_end} Failed: {e}. Adapting chunk size...")
-                    current_chunk_size = max(50, current_chunk_size // 2)
+                    current_chunk_size = max(10, current_chunk_size // 2)
                     time.sleep(120) # 2 min breath before retry on 429
 
         except Exception as e:
