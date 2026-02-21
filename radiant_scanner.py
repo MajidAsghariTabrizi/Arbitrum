@@ -289,6 +289,55 @@ def classify_targets_multicall(all_users_list):
         print(f"  📊 Classified {min(batch_start + MULTICALL_BATCH_SIZE, len(all_users_list))}/{len(all_users_list)} | T1: {len(tier_1)} | T2: {len(tier_2)}", end="\r")
     return {"tier_1_danger": tier_1, "tier_2_watchlist": tier_2}
 
+async def fetch_logs_for_chunk(session, address, start_block, end_block, semaphore, all_users, rpc_manager):
+    """Fetch logs for a specific block chunk using raw JSON-RPC to avoid Web3.py overhead."""
+    async with semaphore:
+        payload = {
+            "jsonrpc": "2.0",
+            "method": "eth_getLogs",
+            "params": [{
+                "address": address,
+                "fromBlock": hex(start_block),
+                "toBlock": hex(end_block),
+                "topics": [TRANSFER_TOPIC]
+            }],
+            "id": 1
+        }
+        
+        for _ in range(3):  # 3 Retries
+            url = rpc_manager.active_url
+            try:
+                async with session.post(url, json=payload, timeout=10) as response:
+                    if response.status in [200, 201]:
+                        data = await response.json()
+                        if 'error' in data:
+                            err_str = str(data['error']).lower()
+                            if rpc_manager.is_rate_limit_error(err_str):
+                                rpc_manager.handle_rate_limit(url)
+                                continue
+                            break
+                        
+                        logs = data.get('result', [])
+                        for log in logs:
+                            topics = log.get('topics', [])
+                            # Topic 1 (from) and Topic 2 (to)
+                            for t in topics[1:3]:
+                                if t and len(t) >= 66:
+                                    user = Web3.to_checksum_address("0x" + t[-40:])
+                                    if user != "0x0000000000000000000000000000000000000000":
+                                        all_users.add(user)
+                        return # Success
+                    elif response.status in [429, 403, 413]:
+                        rpc_manager.handle_rate_limit(url)
+                        continue
+                    else:
+                        break
+            except Exception as e:
+                err_str = str(e).lower()
+                if rpc_manager.is_rate_limit_error(err_str) or rpc_manager.is_hard_error(err_str):
+                    rpc_manager.handle_rate_limit(url)
+                await asyncio.sleep(1)
+
 async def scan_debt_tokens():
     global RPC_WAS_DOWN
     # 1. Proactive Health Check (Auto-Recovery)
