@@ -165,7 +165,7 @@ TRANSFER_TOPIC = Web3.to_hex(Web3.keccak(text="Transfer(address,address,uint256)
 
 # SETTINGS
 TOTAL_BLOCKS_TO_SCAN = 50000   # Check last ~4 hours
-CHUNK_SIZE = 200              # Aave Configuration
+CHUNK_SIZE = 50              # Aave Configuration
 # We aim to keep scan size manageable for free RPCs
 SCAN_INTERVAL = 43200            # 12 hours between scans
 TOTAL_BLOCKS_TO_SCAN = 10000    # Backwards time travel distance

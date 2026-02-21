@@ -367,7 +367,7 @@ class AntiGravityBot:
             "0x47ac0Fb4F2D84898e4D9E7b4DaB3C24507a6D503",
             "0xBE0eB53F46cd790Cd13851d5EFf43D12404d33E8",
             "0x28C6c06298d514Db089934071355E5743bf21d60",
-            "0xd8689E3bA3D55Ea9bB7EDa6f39C614d1a11Fa09",
+            "0xd8689E3bA3D55Ea9bB7EDa6f39C614d1a11Fa090",
         ]
         try:
             path = "/root/Arbitrum/targets.json" if os.path.exists("/root/Arbitrum") else "targets.json"
