@@ -28,7 +28,8 @@ class SmartSyncRPCManager:
     """
     HARD_ERROR_KEYWORDS = ["serverdisconnected", "connectionerror", "connection refused",
                            "cannot connect", "server disconnected", "connectionreseterror",
-                           "oserror", "gaierror", "remotedisconnected"]
+                           "oserror", "gaierror", "remotedisconnected",
+                           "413", "too large", "entity too large"]
 
     def __init__(self):
         # Force load latest .env to capture manual PM2 changes
@@ -354,7 +355,9 @@ def scan_debt_tokens():
                 except Exception as e:
                     # Failure: Halve the chunk size dynamically
                     print(f"\n   ⚠️ Chunk {chunk_start}-{chunk_end} Failed: {e}. Adapting chunk size...")
-                    current_chunk_size = max(5, current_chunk_size // 2)
+                    current_chunk_size = max(1, current_chunk_size // 2)
+                    if current_chunk_size == 1 and any(k in str(e).lower() for k in ["413", "too large"]):
+                        raise e # Bubble up to RPC Manager for node rotation
                     time.sleep(120) # 2 min breath before retry on 429
 
         except Exception as e:
