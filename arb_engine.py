@@ -396,7 +396,9 @@ SCAN_COOLDOWN_SECONDS = 2.0       # Strict 2.0s rate-limit delay
 MAX_SLIPPAGE_BPS = 50             # 0.5% max slippage for trade sizing
 SAFETY_MARGIN_MULTIPLIER = 1.5    # Extra margin on cost estimates to avoid NotProfitable
 LEG_A_SLIPPAGE_BPS = 50           # 0.5% slippage tolerance on Leg A output
-MULTICALL_CHUNK_SIZE = 1        # Larger chunks = fewer HTTP requests = faster scans
+MULTICALL_CHUNK_SIZE = 10        # Larger chunks = fewer HTTP requests = faster scans
+
+ALLOWED_CURVE_TOKENS = {"USDC", "USDT", "DAI"}
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ROUTE CONFIDENCE — Tracks simulation failures per route
@@ -936,7 +938,7 @@ async def scan_and_execute(rpc_manager: SmartAsyncRPCManager, current_block: int
         for dex_name, dex_config in DEXES.items():
             # Skip Curve if token not in 3Pool (USDC, USDT, DAI)
             if dex_config["type"] == "curve":
-                if symbol not in ["USDC", "USDT", "DAI"]:
+                if "USDC" not in ALLOWED_CURVE_TOKENS or symbol not in ALLOWED_CURVE_TOKENS:
                     continue
             
             fees = dex_config["fee_tiers"]
@@ -961,15 +963,18 @@ async def scan_and_execute(rpc_manager: SmartAsyncRPCManager, current_block: int
         # Split into chunks of 15
         chunks = [leg_a_calls[i : i + MULTICALL_CHUNK_SIZE] for i in range(0, len(leg_a_calls), MULTICALL_CHUNK_SIZE)]
         
-        # Execute sequentially with 'Breathe' delay
-        chunk_results = []
-        for chunk in chunks:
-            try:
-                res = await multicall.functions.tryAggregate(False, chunk).call()
-                chunk_results.append(res)
-            except Exception as e:
-                chunk_results.append(e)
-            await asyncio.sleep(0.05)
+        # Re-enable parallel gather but STRICTLY throttle concurrency to respect 20 RPS limit
+        sem = asyncio.Semaphore(4) # Max 4 concurrent HTTP requests
+        async def fetch_chunk_with_sem(task):
+            async with sem:
+                res = await task
+                await asyncio.sleep(0.1) # Mandatory 100ms micro-delay to smooth out the RPS curve
+                return res
+
+        # Execute all tasks concurrently through the semaphore
+        tasks = [multicall.functions.tryAggregate(False, chunk).call() for chunk in chunks]
+        tasks_with_sem = [fetch_chunk_with_sem(t) for t in tasks]
+        chunk_results = await asyncio.gather(*tasks_with_sem, return_exceptions=True)
         
         # Flatten results (safely skip failed chunks)
         leg_a_results = []
@@ -1034,7 +1039,7 @@ async def scan_and_execute(rpc_manager: SmartAsyncRPCManager, current_block: int
 
             # Skip Curve if token not in 3Pool (USDC, USDT, DAI)
             if sell_config["type"] == "curve":
-                 if symbol not in ["USDC", "USDT", "DAI"]:
+                 if symbol not in ALLOWED_CURVE_TOKENS or "USDC" not in ALLOWED_CURVE_TOKENS:
                      continue
 
             fees = sell_config["fee_tiers"]
@@ -1060,15 +1065,18 @@ async def scan_and_execute(rpc_manager: SmartAsyncRPCManager, current_block: int
         # Split into chunks
         chunks_b = [leg_b_calls[i : i + MULTICALL_CHUNK_SIZE] for i in range(0, len(leg_b_calls), MULTICALL_CHUNK_SIZE)]
         
-        # Execute sequentially with 'Breathe' delay
-        chunk_results_b = []
-        for chunk in chunks_b:
-            try:
-                res = await multicall.functions.tryAggregate(False, chunk).call()
-                chunk_results_b.append(res)
-            except Exception as e:
-                chunk_results_b.append(e)
-            await asyncio.sleep(0.05)
+        # Re-enable parallel gather but STRICTLY throttle concurrency to respect 20 RPS limit
+        sem = asyncio.Semaphore(4) # Max 4 concurrent HTTP requests
+        async def fetch_chunk_with_sem(task):
+            async with sem:
+                res = await task
+                await asyncio.sleep(0.1) # Mandatory 100ms micro-delay to smooth out the RPS curve
+                return res
+
+        # Execute all tasks concurrently through the semaphore
+        tasks = [multicall.functions.tryAggregate(False, chunk).call() for chunk in chunks_b]
+        tasks_with_sem = [fetch_chunk_with_sem(t) for t in tasks]
+        chunk_results_b = await asyncio.gather(*tasks_with_sem, return_exceptions=True)
         
         # Flatten (safely skip failed chunks)
         leg_b_results = []

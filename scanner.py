@@ -328,7 +328,6 @@ def scan_debt_tokens():
     print("═══════════════════════════════════════════════════════════")
     
     # Pre-ping logic
-    rpc_manager.rank_free_nodes()
     
     try:
         current_block = rpc_manager.call(w3.eth.get_block_number, is_critical=False)

@@ -368,7 +368,9 @@ MIN_PROFIT_USD = 0.50
 SCAN_COOLDOWN_SECONDS = 2.0       # Strict 2.0s rate-limit delay
 LEG_A_SLIPPAGE_BPS = 50           # 0.5% max slippage allowed for tri-arb routes
 SAFETY_MARGIN_MULTIPLIER = 1.5
-MULTICALL_CHUNK_SIZE = 1        # Larger chunks = fewer HTTP requests = faster scans
+MULTICALL_CHUNK_SIZE = 10        # Larger chunks = fewer HTTP requests = faster scans
+
+ALLOWED_CURVE_TOKENS = {"USDC", "USDT", "DAI"}
 
 # Route Failure Handling
 MAX_ROUTE_FAILURES = 3
@@ -685,14 +687,18 @@ async def perform_multicall(multicall_contract, calls_list: List[Tuple[str, byte
         
     chunks = [calls_list[i : i + MULTICALL_CHUNK_SIZE] for i in range(0, len(calls_list), MULTICALL_CHUNK_SIZE)]
     
-    chunk_results = []
-    for chunk in chunks:
-        try:
-            res = await multicall_contract.functions.tryAggregate(False, chunk).call()
-            chunk_results.append(res)
-        except Exception as e:
-            chunk_results.append(e)
-        await asyncio.sleep(0.05)
+    # Re-enable parallel gather but STRICTLY throttle concurrency to respect 20 RPS limit
+    sem = asyncio.Semaphore(4) # Max 4 concurrent HTTP requests
+    async def fetch_chunk_with_sem(task):
+        async with sem:
+            res = await task
+            await asyncio.sleep(0.1) # Mandatory 100ms micro-delay to smooth out the RPS curve
+            return res
+
+    # Execute all tasks concurrently through the semaphore
+    tasks = [multicall_contract.functions.tryAggregate(False, chunk).call() for chunk in chunks]
+    tasks_with_sem = [fetch_chunk_with_sem(t) for t in tasks]
+    chunk_results = await asyncio.gather(*tasks_with_sem, return_exceptions=True)
         
     flat = []
     for sublist in chunk_results:
@@ -717,7 +723,7 @@ async def scan_triangular_spreads(rpc_manager: SmartAsyncRPCManager, block_numbe
     for sym, token_info in TOKENS.items():
         if sym == "USDC": continue
         for dex_name, config in DEXES.items():
-            if config["type"] == "curve" and sym not in ["USDT", "DAI"]: continue
+            if config["type"] == "curve" and ("USDC" not in ALLOWED_CURVE_TOKENS or sym not in ALLOWED_CURVE_TOKENS): continue
             for fee in config["fee_tiers"]:
                 t, c = _encode_quoter_call(w3, config["quoter"], USDC_ADDRESS, token_info["address"], FLASHLOAN_USDC_AMOUNT, fee, config)
                 leg1_calls.append((t, c))
@@ -753,7 +759,7 @@ async def scan_triangular_spreads(rpc_manager: SmartAsyncRPCManager, block_numbe
             fee1 = data1["fee"]
             for tgt in TARGETS:
                 for dex2, config in DEXES.items():
-                    if config["type"] == "curve" and tgt not in ["USDT", "DAI"]: continue
+                    if config["type"] == "curve" and (hub not in ALLOWED_CURVE_TOKENS or tgt not in ALLOWED_CURVE_TOKENS): continue
                     for fee2 in config["fee_tiers"]:
                         t, c = _encode_quoter_call(w3, config["quoter"], TOKENS[hub]["address"], TOKENS[tgt]["address"], in_amt, fee2, config)
                         leg2_calls.append((t, c))
@@ -767,7 +773,7 @@ async def scan_triangular_spreads(rpc_manager: SmartAsyncRPCManager, block_numbe
             fee1 = data1["fee"]
             for hub in HUBS:
                 for dex2, config in DEXES.items():
-                    if config["type"] == "curve" and hub not in ["USDT", "DAI"]: continue
+                    if config["type"] == "curve" and (tgt not in ALLOWED_CURVE_TOKENS or hub not in ALLOWED_CURVE_TOKENS): continue
                     for fee2 in config["fee_tiers"]:
                         t, c = _encode_quoter_call(w3, config["quoter"], TOKENS[tgt]["address"], TOKENS[hub]["address"], in_amt, fee2, config)
                         leg2_calls.append((t, c))
@@ -816,7 +822,7 @@ async def scan_triangular_spreads(rpc_manager: SmartAsyncRPCManager, block_numbe
                 route_failures.pop(route_key, None)
 
         for dex3, config in DEXES.items():
-            if config["type"] == "curve" and tgt not in ["USDT", "DAI"]: continue
+            if config["type"] == "curve" and (tgt not in ALLOWED_CURVE_TOKENS or "USDC" not in ALLOWED_CURVE_TOKENS): continue
             for fee3 in config["fee_tiers"]:
                 t, c = _encode_quoter_call(w3, config["quoter"], TOKENS[tgt]["address"], USDC_ADDRESS, in_amt, fee3, config)
                 leg3_calls.append((t, c))
